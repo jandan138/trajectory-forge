@@ -1,0 +1,67 @@
+schema_version: trajectory-forge-embodiment-card/v0.1
+embodiment_id: lift2_r5a_bimanual
+runtime_robot_type: manip/lift2/R5a
+action_dim: 16
+notes: Active v0.1 bimanual 6-DOF arm + 2-finger parallel gripper profile matching GenManip lift2/R5a.
+
+chains:
+  left_arm:
+    base_frame: lift2_base_link
+    ee_frame: left_ee_tcp
+    dof_indices: [0, 1, 2, 3, 4, 5]
+    joint_names:
+      - left_joint1
+      - left_joint2
+      - left_joint3
+      - left_joint4
+      - left_joint5
+      - left_joint6
+  right_arm:
+    base_frame: lift2_base_link
+    ee_frame: right_ee_tcp
+    dof_indices: [8, 9, 10, 11, 12, 13]
+    joint_names:
+      - right_joint1
+      - right_joint2
+      - right_joint3
+      - right_joint4
+      - right_joint5
+      - right_joint6
+
+actuator_groups:
+  left_gripper:
+    kind: parallel_gripper
+    dof_indices: [6, 7]
+    joint_names: [left_finger_joint1, left_finger_joint2]
+    control_modes: [position, effort]
+    named_postures:
+      open: [0.044, 0.044]
+      half_open: [0.022, 0.022]
+      closed: [0.0, 0.0]
+  right_gripper:
+    kind: parallel_gripper
+    dof_indices: [14, 15]
+    joint_names: [right_finger_joint1, right_finger_joint2]
+    control_modes: [position, effort]
+    named_postures:
+      open: [0.044, 0.044]
+      half_open: [0.022, 0.022]
+      closed: [0.0, 0.0]
+
+sensor_streams:
+  proprio:
+    modality: proprio
+    rate_hz: 30.0
+    shape: [16]
+  rgb_head:
+    modality: rgb
+    rate_hz: 30.0
+    shape: [480, 640, 3]
+  rgb_left_wrist:
+    modality: rgb
+    rate_hz: 30.0
+    shape: [480, 640, 3]
+  rgb_right_wrist:
+    modality: rgb
+    rate_hz: 30.0
+    shape: [480, 640, 3]

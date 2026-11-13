@@ -12,6 +12,7 @@ PURE_MODULE_ROOTS = (
     REPO_ROOT / "src" / "trajectory_forge" / "sdk",
     REPO_ROOT / "src" / "trajectory_forge" / "worker",
     REPO_ROOT / "src" / "trajectory_forge" / "trajectory",
+    REPO_ROOT / "src" / "trajectory_forge" / "solver",
 )
 FORBIDDEN_IMPORT_MARKERS = (
     "import pxr",

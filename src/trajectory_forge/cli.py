@@ -6,8 +6,21 @@ import os
 from pathlib import Path
 from typing import Sequence
 
+from trajectory_forge.adapters.isaac_genmanip.executor import (
+    DEFAULT_CUROBO_SRC,
+    DEFAULT_GENMANIP_ROOT,
+    DEFAULT_ISAAC_PYTHON,
+    DEFAULT_PACKAGE_STORE_ROOT,
+    IsaacGenManipWorkerConfig,
+    LocalIsaacGenManipExecutor,
+)
+from trajectory_forge.adapters.isaac_genmanip.ssh_executor import (
+    SSHIsaacGenManipExecutor,
+    SSHWorkerConfig,
+)
 from trajectory_forge.core.contracts import (
     RobotSpawnSpec,
+    RolloutJobRequest,
     ScenarioIntakeBrief,
     StageContractSpec,
 )
@@ -17,7 +30,18 @@ from trajectory_forge.intake.genmanip_intake import (
     render_agent_brief_markdown,
 )
 from trajectory_forge.sdk.context import run_controller_preflight
-from trajectory_forge.worker.server import create_worker_server
+from trajectory_forge.solver import (
+    OpenAICompatibleSynthesizer,
+    PrivilegedSolverHarness,
+    SolveSessionConfig,
+    StaticControllerSynthesizer,
+)
+from trajectory_forge.worker.client import RolloutWorkerClient
+from trajectory_forge.worker.server import (
+    DryRunRolloutExecutor,
+    RolloutExecutor,
+    create_worker_server,
+)
 
 
 def _cmd_intake_inspect(args: argparse.Namespace) -> int:
@@ -82,14 +106,87 @@ def _cmd_controller_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_executor_from_args(args: argparse.Namespace) -> RolloutExecutor:
+    backend = getattr(args, "backend", "dry-run")
+    if backend == "dry-run":
+        return DryRunRolloutExecutor()
+    if backend == "isaac-genmanip":
+        return LocalIsaacGenManipExecutor(
+            IsaacGenManipWorkerConfig(
+                isaac_python=Path(args.isaac_python),
+                genmanip_root=Path(args.genmanip_root),
+                package_store_root=Path(args.package_store),
+                output_root=Path(args.output_root),
+                curobo_src=Path(args.curobo_src),
+                timeout_s=float(args.timeout),
+            )
+        )
+    if backend == "ssh-isaac-genmanip":
+        return SSHIsaacGenManipExecutor(
+            SSHWorkerConfig(
+                ssh_host=args.ssh_host,
+                ssh_user=args.ssh_user,
+                ssh_port=int(args.ssh_port),
+                ssh_key_path=Path(args.ssh_key).expanduser(),
+                remote_isaac_python=Path(args.isaac_python),
+                remote_genmanip_root=Path(args.genmanip_root),
+                remote_curobo_src=Path(args.curobo_src),
+                package_store_root=Path(args.package_store),
+                output_root=Path(args.output_root),
+                timeout_s=float(args.timeout),
+            )
+        )
+    if backend == "http-worker":
+        if not getattr(args, "worker_url", None):
+            raise SystemExit("--worker-url is required when --backend http-worker")
+        token = args.token if getattr(args, "token", None) is not None else os.environ.get("TF_WORKER_TOKEN")
+        client = RolloutWorkerClient(
+            base_url=args.worker_url,
+            auth_token=token or None,
+            timeout_s=float(args.timeout),
+        )
+        return client.submit_rollout
+    raise SystemExit(f"Unsupported backend: {backend}")
+
+
+def _add_backend_arguments(parser: argparse.ArgumentParser, *, allow_http_worker: bool) -> None:
+    choices = (
+        ("dry-run", "isaac-genmanip", "ssh-isaac-genmanip", "http-worker")
+        if allow_http_worker
+        else ("dry-run", "isaac-genmanip", "ssh-isaac-genmanip")
+    )
+    parser.add_argument("--backend", choices=choices, default="dry-run")
+    parser.add_argument("--ssh-host", default="10.150.168.71")
+    parser.add_argument("--ssh-user", default="root")
+    parser.add_argument("--ssh-port", type=int, default=22)
+    parser.add_argument("--ssh-key", default="~/.ssh/id_ed25519_github")
+    parser.add_argument("--isaac-python", default=str(DEFAULT_ISAAC_PYTHON))
+    parser.add_argument("--genmanip-root", default=str(DEFAULT_GENMANIP_ROOT))
+    parser.add_argument("--curobo-src", default=str(DEFAULT_CUROBO_SRC))
+    parser.add_argument("--package-store", default=str(DEFAULT_PACKAGE_STORE_ROOT))
+    parser.add_argument("--output-root", default="external_artifacts/rollouts")
+    parser.add_argument("--timeout", type=float, default=900.0)
+    if allow_http_worker:
+        parser.add_argument("--worker-url", default=None, help="HTTP worker base URL for http-worker.")
+        parser.add_argument("--token", default=None, help="Bearer token (or set TF_WORKER_TOKEN).")
+
+
 def _cmd_worker_serve(args: argparse.Namespace) -> int:
     token = args.token if args.token is not None else os.environ.get("TF_WORKER_TOKEN")
+    executor = _build_executor_from_args(args)
+    backend_name = (
+        "dry_run_preflight"
+        if args.backend == "dry-run"
+        else args.backend.replace("-", "_")
+    )
     server = create_worker_server(
         host=args.host,
         port=args.port,
         auth_token=token or None,
+        executor=executor,
+        backend_name=backend_name,
     )
-    print(f"trajectory-forge worker listening on http://{args.host}:{args.port}")
+    print(f"trajectory-forge worker ({backend_name}) listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -97,6 +194,79 @@ def _cmd_worker_serve(args: argparse.Namespace) -> int:
     finally:
         server.server_close()
     return 0
+
+
+def _cmd_rollout_run(args: argparse.Namespace) -> int:
+    card = load_embodiment_card(Path(args.embodiment))
+    code = Path(args.controller).read_text(encoding="utf-8")
+    pkg_path = Path(args.package)
+    package_ref = str(pkg_path.resolve()) if pkg_path.exists() else args.package
+    job_id = args.job_id or f"{pkg_path.name}_{args.mode}"
+    req = RolloutJobRequest(
+        job_id=job_id,
+        scenario_package_ref=package_ref,
+        embodiment_id=card.embodiment_id,
+        mode=args.mode,
+        seed=int(args.seed),
+        controller_code=code,
+        max_steps=int(args.max_steps),
+        resume_from_snapshot_id=args.resume_snapshot,
+        render_media=bool(args.render_media),
+    )
+    executor = _build_executor_from_args(args)
+    result = executor(req)
+    rendered = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    return 0 if result.status == "succeeded" else 1
+
+
+def _cmd_solve(args: argparse.Namespace) -> int:
+    card = load_embodiment_card(Path(args.embodiment))
+    pkg_path = Path(args.package)
+    brief = load_genmanip_collected_package(pkg_path)
+    package_ref = str(pkg_path.resolve())
+    if args.llm:
+        synthesizer = OpenAICompatibleSynthesizer(
+            api_base=args.llm_api_base,
+            model=args.llm_model,
+        )
+    elif args.controller:
+        code = Path(args.controller).read_text(encoding="utf-8")
+        synthesizer = StaticControllerSynthesizer(code)
+    else:
+        raise SystemExit("Either --controller or --llm must be provided to `solve`.")
+
+    executor = _build_executor_from_args(args)
+    harness = PrivilegedSolverHarness(
+        executor=executor,
+        preflight_enabled=(args.backend != "dry-run"),
+    )
+    cfg = SolveSessionConfig(
+        max_attempts=int(args.max_attempts),
+        max_steps=int(args.max_steps),
+        seed=int(args.seed),
+        synthesize_trajectory=not bool(args.no_synthesize),
+        render_gate_media=bool(args.render_gate_media),
+        render_synthesis_media=not bool(args.no_render_synthesis_media),
+    )
+    report = harness.solve(
+        brief=brief,
+        embodiment=card,
+        synthesizer=synthesizer,
+        package_ref=package_ref,
+        config=cfg,
+    )
+    rendered = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if args.report_out:
+        out_path = Path(args.report_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    return 0 if report.succeeded else 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,7 +310,48 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--token", default=None, help="Bearer token (or set TF_WORKER_TOKEN).")
+    _add_backend_arguments(serve, allow_http_worker=False)
     serve.set_defaults(func=_cmd_worker_serve)
+
+    rollout = sub.add_parser("rollout", help="Run a single simulation or dry-run rollout.")
+    rollout_sub = rollout.add_subparsers(dest="subcommand", required=True)
+    run_p = rollout_sub.add_parser("run", help="Execute a RolloutJobRequest.")
+    run_p.add_argument("--controller", required=True, help="Path to controller .py file.")
+    run_p.add_argument("--package", required=True, help="Collected package directory or ref.")
+    run_p.add_argument("--embodiment", required=True, help="Path to EmbodimentCard YAML.")
+    run_p.add_argument(
+        "--mode",
+        choices=("privileged_search", "full_horizon_gate", "trajectory_synthesis"),
+        default="privileged_search",
+    )
+    run_p.add_argument("--max-steps", type=int, default=2000)
+    run_p.add_argument("--seed", type=int, default=0)
+    run_p.add_argument("--job-id", default=None)
+    run_p.add_argument("--resume-snapshot", default=None)
+    run_p.add_argument("--render-media", action="store_true")
+    run_p.add_argument("--out", default=None, help="Optional output path for result JSON.")
+    _add_backend_arguments(run_p, allow_http_worker=True)
+    run_p.set_defaults(func=_cmd_rollout_run)
+
+    solve_p = sub.add_parser(
+        "solve",
+        help="Run closed-loop Embodied-First-Exam Privileged solve + gate + synthesis.",
+    )
+    solve_p.add_argument("--package", required=True, help="Collected package directory.")
+    solve_p.add_argument("--embodiment", required=True, help="Path to EmbodimentCard YAML.")
+    solve_p.add_argument("--controller", default=None, help="Static controller .py path.")
+    solve_p.add_argument("--llm", action="store_true", help="Use OpenAICompatibleSynthesizer.")
+    solve_p.add_argument("--llm-model", default=None)
+    solve_p.add_argument("--llm-api-base", default=None)
+    solve_p.add_argument("--max-attempts", type=int, default=5)
+    solve_p.add_argument("--max-steps", type=int, default=2000)
+    solve_p.add_argument("--seed", type=int, default=0)
+    solve_p.add_argument("--render-gate-media", action="store_true")
+    solve_p.add_argument("--no-render-synthesis-media", action="store_true")
+    solve_p.add_argument("--no-synthesize", action="store_true")
+    solve_p.add_argument("--report-out", default=None, help="Optional report JSON path.")
+    _add_backend_arguments(solve_p, allow_http_worker=True)
+    solve_p.set_defaults(func=_cmd_solve)
 
     return parser
 

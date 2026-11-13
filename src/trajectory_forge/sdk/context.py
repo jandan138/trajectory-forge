@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from trajectory_forge.core.contracts import (
     ALLOWED_EXECUTION_MODES,
@@ -21,8 +21,8 @@ from trajectory_forge.sdk.math3d import (
     sample_prismatic_sweep_poses,
     sample_revolute_arc_poses,
 )
-from trajectory_forge.trajectory.manifest import build_trajectory_episode_manifest
 from trajectory_forge.sdk.safety import validate_controller_source
+from trajectory_forge.trajectory.manifest import build_trajectory_episode_manifest
 
 
 @dataclass(frozen=True)
@@ -45,25 +45,158 @@ class WrenchReading:
     torque_nm: Vec3
 
 
-class WorldAPI:
-    """Privileged world inspection API exposed to the agent controller."""
+@dataclass(frozen=True)
+class AABB3D:
+    """World-space axis-aligned bounding box in meters."""
 
-    def __init__(self, brief: ScenarioIntakeBrief) -> None:
+    min_xyz: Vec3
+    max_xyz: Vec3
+
+    @property
+    def center_xyz(self) -> Vec3:
+        return (
+            0.5 * (self.min_xyz[0] + self.max_xyz[0]),
+            0.5 * (self.min_xyz[1] + self.max_xyz[1]),
+            0.5 * (self.min_xyz[2] + self.max_xyz[2]),
+        )
+
+    @property
+    def extents_xyz(self) -> Vec3:
+        return (
+            self.max_xyz[0] - self.min_xyz[0],
+            self.max_xyz[1] - self.min_xyz[1],
+            self.max_xyz[2] - self.min_xyz[2],
+        )
+
+
+@dataclass(frozen=True)
+class JointAxisInfo:
+    """Live world-space hinge/slide geometry and drive bounds for an articulated DOF."""
+
+    object_id: str
+    semantic_joint: str
+    dof_index: int
+    joint_type: str
+    pivot_world: Vec3
+    axis_world: Vec3
+    lower_limit: float
+    upper_limit: float
+    current_position: float
+
+
+class SimBackendProtocol(Protocol):
+    """Backend protocol implemented by both DryRunSimBackend and IsaacGenManipSimBackend."""
+
+    brief: ScenarioIntakeBrief
+    embodiment: EmbodimentCard
+    mode: str
+    steps_executed: int
+    snapshots_used: int
+    controller_logs: list[str]
+
+    def live_object_pose(self, object_id: str) -> Pose3D: ...
+    def live_object_aabb(self, object_id: str) -> AABB3D: ...
+    def live_part_pose(self, part_id: str) -> Pose3D: ...
+    def live_part_aabb(self, part_id: str) -> AABB3D: ...
+    def live_joint_positions(self, object_id: str) -> tuple[float, ...]: ...
+    def live_joint_value(self, object_id: str, semantic_joint: str) -> float: ...
+    def live_joint_info(self, object_id: str, semantic_joint: str) -> JointAxisInfo: ...
+    def live_stage_scores(self) -> tuple[float, ...]: ...
+    def live_current_score(self) -> float: ...
+    def live_contacts_summary(self) -> dict[str, Any]: ...
+    def ee_pose(self, chain: str) -> Pose3D: ...
+    def solve_ik(
+        self, chain: str, target_pose: Pose3D, *, check_collision: bool = True
+    ) -> tuple[float, ...]: ...
+    def move_to_pose(
+        self,
+        chain: str,
+        target_pose: Pose3D,
+        *,
+        steps: int = 40,
+        use_motion_gen: bool = False,
+        check_collision: bool = True,
+    ) -> tuple[float, ...]: ...
+    def follow_cartesian_path(
+        self,
+        chain: str,
+        poses: Sequence[Pose3D],
+        *,
+        steps_per_waypoint: int = 3,
+    ) -> tuple[float, ...]: ...
+    def move_joints(
+        self,
+        chain: str,
+        joint_positions: Sequence[float],
+        *,
+        steps: int = 30,
+    ) -> tuple[float, ...]: ...
+    def move_base_world(
+        self,
+        dx_m: float,
+        dy_m: float,
+        dyaw_deg: float = 0.0,
+        *,
+        steps: int = 30,
+    ) -> tuple[float, float, float]: ...
+    def base_pose_world(self) -> Pose3D: ...
+    def set_torso_lift(self, height_m: float, *, steps: int = 20) -> float: ...
+    def torso_lift(self) -> float: ...
+    def command_actuator(
+        self,
+        group: str,
+        targets: tuple[float, ...],
+        *,
+        control_mode: str = "position",
+        steps: int = 16,
+    ) -> None: ...
+    def current_proprio(self) -> tuple[float, ...]: ...
+    def wrist_wrench(self, chain: str) -> WrenchReading: ...
+    def tactile(self, group: str) -> TactileReading: ...
+    def save_snapshot(self, label: str) -> SnapshotHandle: ...
+    def restore_snapshot(self, handle: SnapshotHandle) -> None: ...
+    def reset_to_t0(self) -> None: ...
+    def step(self, steps: int) -> None: ...
+
+
+class WorldAPI:
+    """Privileged live simulator state API exposed to the agent controller."""
+
+    def __init__(self, brief: ScenarioIntakeBrief, backend: SimBackendProtocol) -> None:
         self._brief = brief
+        self._backend = backend
 
     @property
     def instruction(self) -> str:
         return self._brief.instruction
 
+    def object_ids(self) -> tuple[str, ...]:
+        return tuple(self._brief.objects.keys())
+
+    def part_ids(self) -> tuple[str, ...]:
+        return self._brief.part_ids
+
     def object_pose(self, object_id: str) -> Pose3D:
-        if object_id not in self._brief.objects:
-            raise KeyError(f"Unknown object_id: {object_id!r}")
-        return Pose3D.from_spec(self._brief.objects[object_id].initial_pose)
+        return self._backend.live_object_pose(object_id)
+
+    def object_aabb(self, object_id: str) -> AABB3D:
+        return self._backend.live_object_aabb(object_id)
+
+    def part_pose(self, part_id: str) -> Pose3D:
+        return self._backend.live_part_pose(part_id)
+
+    def part_aabb(self, part_id: str) -> AABB3D:
+        return self._backend.live_part_aabb(part_id)
 
     def named_frame(self, object_id: str, frame_name: str) -> Pose3D:
         if object_id not in self._brief.objects:
             raise KeyError(f"Unknown object_id: {object_id!r}")
-        return pose_from_named_frame(self._brief.objects[object_id], frame_name)
+        live_obj_pose = self._backend.live_object_pose(object_id)
+        return pose_from_named_frame(
+            self._brief.objects[object_id],
+            frame_name,
+            object_world_pose=live_obj_pose,
+        )
 
     def joint_band(self, object_id: str, semantic_joint: str, state_name: str) -> tuple[float, float]:
         if object_id not in self._brief.objects:
@@ -76,13 +209,45 @@ class WorldAPI:
             raise KeyError(f"DOF {semantic_joint!r} has no state {state_name!r}")
         return dof.states[state_name]
 
+    def joint_positions(self, object_id: str) -> tuple[float, ...]:
+        return self._backend.live_joint_positions(object_id)
+
+    def joint_value(self, object_id: str, semantic_joint: str) -> float:
+        return self._backend.live_joint_value(object_id, semantic_joint)
+
+    def joint_info(self, object_id: str, semantic_joint: str) -> JointAxisInfo:
+        return self._backend.live_joint_info(object_id, semantic_joint)
+
+    def stage_scores(self) -> tuple[float, ...]:
+        return self._backend.live_stage_scores()
+
+    def is_stage_satisfied(self, stage_index: int) -> bool:
+        scores = self._backend.live_stage_scores()
+        if stage_index < 0 or stage_index >= len(scores):
+            raise IndexError(f"stage_index {stage_index} out of range (0..{len(scores) - 1})")
+        return scores[stage_index] >= 0.9999
+
+    def current_score(self) -> float:
+        return self._backend.live_current_score()
+
+    def contacts_summary(self) -> dict[str, Any]:
+        return self._backend.live_contacts_summary()
+
 
 class KinematicsAPI:
-    """Chain-agnostic kinematics and mechanism arc/sweep trajectory helpers."""
+    """Chain-agnostic kinematics, IK, Cartesian motion, and base/torso control."""
 
-    def __init__(self, embodiment: EmbodimentCard, backend: DryRunSimBackend) -> None:
+    def __init__(self, embodiment: EmbodimentCard, backend: SimBackendProtocol) -> None:
         self._embodiment = embodiment
         self._backend = backend
+
+    def _validate_chain(self, chain: str) -> None:
+        if chain not in self._embodiment.chains:
+            raise KeyError(f"Unknown kinematic chain: {chain!r}")
+
+    def ee_pose(self, chain: str) -> Pose3D:
+        self._validate_chain(chain)
+        return self._backend.ee_pose(chain)
 
     def solve_ik(
         self,
@@ -90,11 +255,86 @@ class KinematicsAPI:
         target_pose: Pose3D,
         check_collision: bool = True,
     ) -> tuple[float, ...]:
-        if chain not in self._embodiment.chains:
-            raise KeyError(f"Unknown kinematic chain: {chain!r}")
+        self._validate_chain(chain)
+        return self._backend.solve_ik(chain, target_pose, check_collision=check_collision)
+
+    def move_to_pose(
+        self,
+        chain: str,
+        target_pose: Pose3D,
+        *,
+        steps: int = 40,
+        use_motion_gen: bool = False,
+        check_collision: bool = True,
+    ) -> tuple[float, ...]:
+        self._validate_chain(chain)
+        if steps <= 0:
+            raise ContractValidationError("move_to_pose requires steps > 0")
+        return self._backend.move_to_pose(
+            chain,
+            target_pose,
+            steps=steps,
+            use_motion_gen=use_motion_gen,
+            check_collision=check_collision,
+        )
+
+    def follow_cartesian_path(
+        self,
+        chain: str,
+        poses: Sequence[Pose3D],
+        *,
+        steps_per_waypoint: int = 3,
+    ) -> tuple[float, ...]:
+        self._validate_chain(chain)
+        if not poses:
+            raise ContractValidationError("follow_cartesian_path requires non-empty poses")
+        if steps_per_waypoint <= 0:
+            raise ContractValidationError("steps_per_waypoint must be > 0")
+        return self._backend.follow_cartesian_path(
+            chain, poses, steps_per_waypoint=steps_per_waypoint
+        )
+
+    def move_joints(
+        self,
+        chain: str,
+        joint_positions: Sequence[float],
+        *,
+        steps: int = 30,
+    ) -> tuple[float, ...]:
+        self._validate_chain(chain)
         spec = self._embodiment.chains[chain]
-        self._backend.record_chain_command(chain, target_pose, check_collision=check_collision)
-        return tuple(0.0 for _ in spec.dof_indices)
+        if len(joint_positions) != len(spec.dof_indices):
+            raise ContractValidationError(
+                f"Chain {chain!r} expects {len(spec.dof_indices)} joints, got {len(joint_positions)}"
+            )
+        return self._backend.move_joints(
+            chain, tuple(float(v) for v in joint_positions), steps=steps
+        )
+
+    def move_base_world(
+        self,
+        dx_m: float,
+        dy_m: float,
+        dyaw_deg: float = 0.0,
+        *,
+        steps: int = 30,
+    ) -> tuple[float, float, float]:
+        if steps <= 0:
+            raise ContractValidationError("move_base_world requires steps > 0")
+        return self._backend.move_base_world(
+            float(dx_m), float(dy_m), float(dyaw_deg), steps=steps
+        )
+
+    def base_pose_world(self) -> Pose3D:
+        return self._backend.base_pose_world()
+
+    def set_torso_lift(self, height_m: float, *, steps: int = 20) -> float:
+        if steps <= 0:
+            raise ContractValidationError("set_torso_lift requires steps > 0")
+        return self._backend.set_torso_lift(float(height_m), steps=steps)
+
+    def torso_lift(self) -> float:
+        return self._backend.torso_lift()
 
     def plan_revolute_arc(
         self,
@@ -106,8 +346,7 @@ class KinematicsAPI:
         delta_angle_rad: float,
         num_waypoints: int = 8,
     ) -> list[Pose3D]:
-        if chain not in self._embodiment.chains:
-            raise KeyError(f"Unknown kinematic chain: {chain!r}")
+        self._validate_chain(chain)
         return sample_revolute_arc_poses(
             start_pose=start_pose,
             hinge_pivot_world=hinge_pivot_world,
@@ -125,8 +364,7 @@ class KinematicsAPI:
         distance_m: float,
         num_waypoints: int = 8,
     ) -> list[Pose3D]:
-        if chain not in self._embodiment.chains:
-            raise KeyError(f"Unknown kinematic chain: {chain!r}")
+        self._validate_chain(chain)
         return sample_prismatic_sweep_poses(
             start_pose=start_pose,
             direction_world=direction_world,
@@ -138,7 +376,7 @@ class KinematicsAPI:
 class EndEffectorAPI:
     """Cross-embodiment actuator group API (parallel grippers and dexterous hands)."""
 
-    def __init__(self, embodiment: EmbodimentCard, backend: DryRunSimBackend) -> None:
+    def __init__(self, embodiment: EmbodimentCard, backend: SimBackendProtocol) -> None:
         self._embodiment = embodiment
         self._backend = backend
 
@@ -147,6 +385,8 @@ class EndEffectorAPI:
         group: str,
         posture_name: str,
         control_mode: str = "position",
+        *,
+        steps: int = 16,
     ) -> tuple[float, ...]:
         if group not in self._embodiment.actuator_groups:
             raise KeyError(f"Unknown actuator group: {group!r}")
@@ -158,7 +398,7 @@ class EndEffectorAPI:
         if posture_name not in grp.named_postures:
             raise KeyError(f"Actuator group {group!r} has no posture {posture_name!r}")
         targets = grp.named_postures[posture_name]
-        self._backend.record_actuator_command(group, targets, control_mode)
+        self._backend.command_actuator(group, targets, control_mode=control_mode, steps=steps)
         return targets
 
     def command_targets(
@@ -166,6 +406,8 @@ class EndEffectorAPI:
         group: str,
         targets: Sequence[float],
         control_mode: str = "position",
+        *,
+        steps: int = 16,
     ) -> tuple[float, ...]:
         if group not in self._embodiment.actuator_groups:
             raise KeyError(f"Unknown actuator group: {group!r}")
@@ -180,45 +422,42 @@ class EndEffectorAPI:
                 f"got {len(targets)}"
             )
         vec = tuple(float(v) for v in targets)
-        self._backend.record_actuator_command(group, vec, control_mode)
+        self._backend.command_actuator(group, vec, control_mode=control_mode, steps=steps)
         return vec
 
 
 class SensorsAPI:
     """Standardized sensorimotor feedback streams (proprio, wrench, tactile)."""
 
-    def __init__(self, embodiment: EmbodimentCard, backend: DryRunSimBackend) -> None:
+    def __init__(self, embodiment: EmbodimentCard, backend: SimBackendProtocol) -> None:
         self._embodiment = embodiment
         self._backend = backend
 
     def proprio(self) -> tuple[float, ...]:
-        return self._backend.current_joint_state
+        return self._backend.current_proprio()
+
+    def gripper_widths(self, group: str) -> tuple[float, ...]:
+        if group not in self._embodiment.actuator_groups:
+            raise KeyError(f"Unknown actuator group: {group!r}")
+        grp = self._embodiment.actuator_groups[group]
+        q = self._backend.current_proprio()
+        return tuple(float(q[idx]) for idx in grp.dof_indices)
 
     def wrist_wrench(self, chain: str) -> WrenchReading:
         if chain not in self._embodiment.chains:
             raise KeyError(f"Unknown kinematic chain: {chain!r}")
-        return WrenchReading(
-            chain_id=chain,
-            force_n=(0.0, 0.0, 0.0),
-            torque_nm=(0.0, 0.0, 0.0),
-        )
+        return self._backend.wrist_wrench(chain)
 
     def tactile(self, group: str) -> TactileReading:
         if group not in self._embodiment.actuator_groups:
             raise KeyError(f"Unknown actuator group: {group!r}")
-        return TactileReading(
-            group_id=group,
-            normal_force_n=0.0,
-            shear_force_n=(0.0, 0.0),
-            slip_detected=False,
-            in_contact=False,
-        )
+        return self._backend.tactile(group)
 
 
 class CheckpointAPI:
     """Snapshot save/restore API strictly gated to privileged_search mode."""
 
-    def __init__(self, mode: str, backend: DryRunSimBackend) -> None:
+    def __init__(self, mode: str, backend: SimBackendProtocol) -> None:
         self._mode = mode
         self._backend = backend
 
@@ -229,12 +468,25 @@ class CheckpointAPI:
             )
         return self._backend.save_snapshot(label)
 
+    def save_if_search(self, label: str) -> SnapshotHandle | None:
+        """Save a checkpoint during privileged_search; harmlessly no-op in continuous gate/synthesis."""
+        if self._mode != "privileged_search":
+            return None
+        return self._backend.save_snapshot(label)
+
     def restore_snapshot(self, handle: SnapshotHandle) -> None:
         if self._mode != "privileged_search":
             raise FirewallViolationError(
                 f"restore_snapshot is forbidden in {self._mode!r} mode"
             )
         self._backend.restore_snapshot(handle)
+
+    def reset_to_t0(self) -> None:
+        if self._mode != "privileged_search":
+            raise FirewallViolationError(
+                f"reset_to_t0 is forbidden in {self._mode!r} mode"
+            )
+        self._backend.reset_to_t0()
 
 
 class ControllerContext:
@@ -246,9 +498,10 @@ class ControllerContext:
         brief: ScenarioIntakeBrief,
         embodiment: EmbodimentCard,
         mode: str,
-        backend: DryRunSimBackend,
+        backend: SimBackendProtocol,
     ) -> None:
-        self.world = WorldAPI(brief)
+        self.mode = mode
+        self.world = WorldAPI(brief, backend)
         self.kinematics = KinematicsAPI(embodiment, backend)
         self.end_effector = EndEffectorAPI(embodiment, backend)
         self.sensors = SensorsAPI(embodiment, backend)
@@ -280,36 +533,235 @@ class DryRunSimBackend:
         self.max_steps = max_steps
         self.steps_executed = 0
         self.snapshots_used = 0
-        self._snapshots: dict[str, int] = {}
+        self.controller_logs: list[str] = []
+        self._snapshots: dict[str, tuple[int, tuple[float, ...], float, tuple[float, float, float]]] = {}
+        self.saved_snapshots: list[SnapshotHandle] = []
         self.chain_commands: list[tuple[str, Pose3D, bool]] = []
         self.actuator_commands: list[tuple[str, tuple[float, ...], str]] = []
         init_len = embodiment.action_dim
-        self.current_joint_state: tuple[float, ...] = tuple(0.0 for _ in range(init_len))
+        self.current_joint_state: list[float] = [0.0 for _ in range(init_len)]
+        if brief.robot_spawn.joint_positions and len(brief.robot_spawn.joint_positions) == init_len:
+            self.current_joint_state = [float(v) for v in brief.robot_spawn.joint_positions]
+        self._torso_lift_m = 0.46
+        self._base_xyz = list(brief.robot_spawn.xyz)
+        self._ee_poses: dict[str, Pose3D] = {
+            cid: Pose3D(xyz=(0.0 if cid == "left_arm" else 0.25, -0.45, 0.95))
+            for cid in embodiment.chains
+        }
 
-    def record_chain_command(self, chain: str, pose: Pose3D, *, check_collision: bool) -> None:
-        self.chain_commands.append((chain, pose, check_collision))
+    def live_object_pose(self, object_id: str) -> Pose3D:
+        if object_id not in self.brief.objects:
+            raise KeyError(f"Unknown object_id: {object_id!r}")
+        return Pose3D.from_spec(self.brief.objects[object_id].initial_pose)
 
-    def record_actuator_command(
-        self, group: str, targets: tuple[float, ...], control_mode: str
+    def live_object_aabb(self, object_id: str) -> AABB3D:
+        p = self.live_object_pose(object_id).xyz
+        return AABB3D(
+            min_xyz=(p[0] - 0.05, p[1] - 0.05, p[2] - 0.05),
+            max_xyz=(p[0] + 0.05, p[1] + 0.05, p[2] + 0.05),
+        )
+
+    def live_part_pose(self, part_id: str) -> Pose3D:
+        if part_id not in self.brief.part_ids and part_id not in self.brief.objects:
+            raise KeyError(f"Unknown part_id: {part_id!r}")
+        return Pose3D(xyz=(0.0, 0.0, 0.8))
+
+    def live_part_aabb(self, part_id: str) -> AABB3D:
+        p = self.live_part_pose(part_id).xyz
+        return AABB3D(
+            min_xyz=(p[0] - 0.03, p[1] - 0.03, p[2] - 0.03),
+            max_xyz=(p[0] + 0.03, p[1] + 0.03, p[2] + 0.03),
+        )
+
+    def live_joint_positions(self, object_id: str) -> tuple[float, ...]:
+        if object_id not in self.brief.objects:
+            raise KeyError(f"Unknown object_id: {object_id!r}")
+        obj = self.brief.objects[object_id]
+        if obj.reset_joint_positions:
+            return obj.reset_joint_positions
+        n_dofs = max((d.dof_index + 1 for d in obj.dofs.values()), default=0)
+        return tuple(0.0 for _ in range(n_dofs))
+
+    def live_joint_value(self, object_id: str, semantic_joint: str) -> float:
+        if object_id not in self.brief.objects:
+            raise KeyError(f"Unknown object_id: {object_id!r}")
+        obj = self.brief.objects[object_id]
+        if semantic_joint not in obj.dofs:
+            raise KeyError(f"Object {object_id!r} has no dof {semantic_joint!r}")
+        positions = self.live_joint_positions(object_id)
+        idx = obj.dofs[semantic_joint].dof_index
+        return float(positions[idx]) if idx < len(positions) else 0.0
+
+    def live_joint_info(self, object_id: str, semantic_joint: str) -> JointAxisInfo:
+        val = self.live_joint_value(object_id, semantic_joint)
+        obj = self.brief.objects[object_id]
+        dof = obj.dofs[semantic_joint]
+        p = self.live_object_pose(object_id).xyz
+        return JointAxisInfo(
+            object_id=object_id,
+            semantic_joint=semantic_joint,
+            dof_index=dof.dof_index,
+            joint_type="revolute",
+            pivot_world=p,
+            axis_world=(1.0, 0.0, 0.0),
+            lower_limit=-1.5,
+            upper_limit=1.5,
+            current_position=val,
+        )
+
+    def live_stage_scores(self) -> tuple[float, ...]:
+        return tuple(0.0 for _ in self.brief.stages)
+
+    def live_current_score(self) -> float:
+        scores = self.live_stage_scores()
+        return sum(scores) / len(scores) if scores else 0.0
+
+    def live_contacts_summary(self) -> dict[str, Any]:
+        return {"backend": "dry_run_preflight", "active_contacts": []}
+
+    def ee_pose(self, chain: str) -> Pose3D:
+        return self._ee_poses[chain]
+
+    def solve_ik(
+        self, chain: str, target_pose: Pose3D, *, check_collision: bool = True
+    ) -> tuple[float, ...]:
+        self.chain_commands.append((chain, target_pose, check_collision))
+        spec = self.embodiment.chains[chain]
+        return tuple(self.current_joint_state[i] for i in spec.dof_indices)
+
+    def move_to_pose(
+        self,
+        chain: str,
+        target_pose: Pose3D,
+        *,
+        steps: int = 40,
+        use_motion_gen: bool = False,
+        check_collision: bool = True,
+    ) -> tuple[float, ...]:
+        _ = use_motion_gen
+        q = self.solve_ik(chain, target_pose, check_collision=check_collision)
+        self._ee_poses[chain] = target_pose
+        self.step(steps)
+        return q
+
+    def follow_cartesian_path(
+        self,
+        chain: str,
+        poses: Sequence[Pose3D],
+        *,
+        steps_per_waypoint: int = 3,
+    ) -> tuple[float, ...]:
+        last_q: tuple[float, ...] = ()
+        for pose in poses:
+            last_q = self.solve_ik(chain, pose, check_collision=True)
+            self._ee_poses[chain] = pose
+            self.step(steps_per_waypoint)
+        return last_q
+
+    def move_joints(
+        self,
+        chain: str,
+        joint_positions: Sequence[float],
+        *,
+        steps: int = 30,
+    ) -> tuple[float, ...]:
+        spec = self.embodiment.chains[chain]
+        for idx, val in zip(spec.dof_indices, joint_positions):
+            self.current_joint_state[idx] = float(val)
+        self.step(steps)
+        return tuple(float(v) for v in joint_positions)
+
+    def move_base_world(
+        self,
+        dx_m: float,
+        dy_m: float,
+        dyaw_deg: float = 0.0,
+        *,
+        steps: int = 30,
+    ) -> tuple[float, float, float]:
+        _ = dyaw_deg
+        self._base_xyz[0] += float(dx_m)
+        self._base_xyz[1] += float(dy_m)
+        self.step(steps)
+        return (self._base_xyz[0], self._base_xyz[1], 0.0)
+
+    def base_pose_world(self) -> Pose3D:
+        return Pose3D(
+            xyz=(self._base_xyz[0], self._base_xyz[1], self._base_xyz[2]),
+            wxyz=self.brief.robot_spawn.wxyz,
+        )
+
+    def set_torso_lift(self, height_m: float, *, steps: int = 20) -> float:
+        self._torso_lift_m = float(height_m)
+        self.step(steps)
+        return self._torso_lift_m
+
+    def torso_lift(self) -> float:
+        return self._torso_lift_m
+
+    def command_actuator(
+        self,
+        group: str,
+        targets: tuple[float, ...],
+        *,
+        control_mode: str = "position",
+        steps: int = 16,
     ) -> None:
         self.actuator_commands.append((group, targets, control_mode))
+        grp = self.embodiment.actuator_groups[group]
+        for idx, val in zip(grp.dof_indices, targets):
+            self.current_joint_state[idx] = float(val)
+        self.step(steps)
+
+    def current_proprio(self) -> tuple[float, ...]:
+        return tuple(self.current_joint_state)
+
+    def wrist_wrench(self, chain: str) -> WrenchReading:
+        return WrenchReading(chain_id=chain, force_n=(0.0, 0.0, 0.0), torque_nm=(0.0, 0.0, 0.0))
+
+    def tactile(self, group: str) -> TactileReading:
+        return TactileReading(
+            group_id=group,
+            normal_force_n=0.0,
+            shear_force_n=(0.0, 0.0),
+            slip_detected=False,
+            in_contact=False,
+        )
 
     def save_snapshot(self, label: str) -> SnapshotHandle:
         self.snapshots_used += 1
         snap_id = f"snap_{self.snapshots_used}"
-        self._snapshots[snap_id] = self.steps_executed
-        return SnapshotHandle(snapshot_id=snap_id, label=label, step_index=self.steps_executed)
+        self._snapshots[snap_id] = (
+            self.steps_executed,
+            tuple(self.current_joint_state),
+            self._torso_lift_m,
+            (self._base_xyz[0], self._base_xyz[1], self._base_xyz[2]),
+        )
+        handle = SnapshotHandle(snapshot_id=snap_id, label=label, step_index=self.steps_executed)
+        self.saved_snapshots.append(handle)
+        return handle
 
     def restore_snapshot(self, handle: SnapshotHandle) -> None:
         if handle.snapshot_id not in self._snapshots:
             raise ContractValidationError(f"Unknown snapshot_id: {handle.snapshot_id!r}")
+        _, joints, lift_m, base_xyz = self._snapshots[handle.snapshot_id]
+        self.current_joint_state = list(joints)
+        self._torso_lift_m = lift_m
+        self._base_xyz = list(base_xyz)
         self.snapshots_used += 1
+
+    def reset_to_t0(self) -> None:
+        self.snapshots_used += 1
+        self._torso_lift_m = 0.46
+        self._base_xyz = list(self.brief.robot_spawn.xyz)
+        if self.brief.robot_spawn.joint_positions:
+            self.current_joint_state = [float(v) for v in self.brief.robot_spawn.joint_positions]
+        else:
+            self.current_joint_state = [0.0 for _ in range(self.embodiment.action_dim)]
 
     def step(self, steps: int) -> None:
         if self.steps_executed + steps > self.max_steps:
-            raise ContractValidationError(
-                f"Controller exceeded max_steps={self.max_steps}"
-            )
+            raise ContractValidationError(f"Controller exceeded max_steps={self.max_steps}")
         self.steps_executed += steps
 
 
@@ -326,7 +778,16 @@ def _safe_import(
     return __import__(name, globals, locals, fromlist, level)
 
 
-def _restricted_globals() -> dict[str, Any]:
+def restricted_globals(log_sink: list[str] | None = None) -> dict[str, Any]:
+    """Build restricted execution globals for agent-authored `solve(ctx)` scripts."""
+
+    def _bounded_print(*args: object, sep: str = " ", end: str = "") -> None:
+        if log_sink is None or len(log_sink) >= 200:
+            return
+        msg = (sep.join(str(a) for a in args) + end).strip()
+        if msg:
+            log_sink.append(msg[:500])
+
     safe_builtins = {
         "__import__": _safe_import,
         "abs": abs,
@@ -337,10 +798,12 @@ def _restricted_globals() -> dict[str, Any]:
         "enumerate": enumerate,
         "float": float,
         "int": int,
+        "isinstance": isinstance,
         "len": len,
         "list": list,
         "max": max,
         "min": min,
+        "print": _bounded_print,
         "range": range,
         "round": round,
         "set": set,
@@ -349,9 +812,11 @@ def _restricted_globals() -> dict[str, Any]:
         "sum": sum,
         "tuple": tuple,
         "zip": zip,
+        "AssertionError": AssertionError,
         "Exception": Exception,
-        "ValueError": ValueError,
+        "KeyError": KeyError,
         "RuntimeError": RuntimeError,
+        "ValueError": ValueError,
     }
     return {"__builtins__": safe_builtins}
 
@@ -379,7 +844,7 @@ def run_controller_preflight(
         mode=mode,
         backend=backend,
     )
-    ns = _restricted_globals()
+    ns = restricted_globals(backend.controller_logs)
     compiled = compile(controller_code, "<controller>", "exec")
     exec(compiled, ns, ns)
     solve_fn = ns.get("solve")
@@ -432,4 +897,9 @@ def run_controller_preflight(
         stage_progression=tuple(stages),
         diagnostics=SolvabilityDiagnostics(),
         trajectory_manifest=manifest,
+        saved_snapshots=tuple(backend.saved_snapshots),
+        state_summary={
+            "backend": "dry_run_preflight",
+            "controller_logs": list(backend.controller_logs),
+        },
     )

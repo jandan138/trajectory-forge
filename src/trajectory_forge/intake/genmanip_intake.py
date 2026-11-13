@@ -48,25 +48,48 @@ def _resolve_package_root(package_dir: Path) -> tuple[Path, Path]:
     )
 
 
-def _parse_pose(raw: Mapping[str, Any] | None) -> PoseSpec:
-    if not isinstance(raw, Mapping):
+def _parse_pose(
+    raw: Mapping[str, Any] | None,
+    layout_entry: Mapping[str, Any] | None = None,
+) -> PoseSpec:
+    if not isinstance(raw, Mapping) and not isinstance(layout_entry, Mapping):
         return PoseSpec(xyz=(0.0, 0.0, 0.0), wxyz=(1.0, 0.0, 0.0, 0.0))
-    xyz_raw = raw.get("xyz") or raw.get("translation_parent_local_m") or (0.0, 0.0, 0.0)
-    wxyz_raw = raw.get("wxyz") or raw.get("rotation_parent_local_wxyz") or (1.0, 0.0, 0.0, 0.0)
+    raw_map = raw if isinstance(raw, Mapping) else {}
+    layout_map = layout_entry if isinstance(layout_entry, Mapping) else {}
+    xyz_raw = (
+        raw_map.get("xyz")
+        or raw_map.get("translation_parent_local_m")
+        or layout_map.get("position")
+        or (0.0, 0.0, 0.0)
+    )
+    wxyz_raw = (
+        raw_map.get("wxyz")
+        or raw_map.get("rotation_parent_local_wxyz")
+        or layout_map.get("orientation")
+        or (1.0, 0.0, 0.0, 0.0)
+    )
     return PoseSpec(
         xyz=(float(xyz_raw[0]), float(xyz_raw[1]), float(xyz_raw[2])),
         wxyz=(float(wxyz_raw[0]), float(wxyz_raw[1]), float(wxyz_raw[2]), float(wxyz_raw[3])),
     )
 
 
-def _parse_object_contract(raw: Mapping[str, Any]) -> ObjectContractSpec:
+def _parse_object_contract(
+    raw: Mapping[str, Any],
+    initial_layout: Mapping[str, Any] | None = None,
+) -> ObjectContractSpec:
     object_id = str(raw.get("scenario_object_id") or raw.get("runtime_uid") or "")
     if not object_id:
         raise ContractValidationError("Runtime contract object missing scenario_object_id")
     runtime_uid = str(raw.get("runtime_uid") or object_id)
     role = str(raw.get("role", "object"))
     state_prim_path = str(raw.get("state_prim_path", ""))
-    initial_pose = _parse_pose(raw.get("initial_pose"))
+    layout_entry = (
+        initial_layout.get(runtime_uid)
+        if isinstance(initial_layout, Mapping)
+        else None
+    )
+    initial_pose = _parse_pose(raw.get("initial_pose"), layout_entry)
 
     named_frames: dict[str, NamedFrameSpec] = {}
     articulation = raw.get("articulation")
@@ -195,11 +218,31 @@ def load_genmanip_collected_package(package_dir: Path) -> ScenarioIntakeBrief:
     if not isinstance(task_data, Mapping):
         raise ContractValidationError("episode_metadata missing task_data mapping")
 
-    robot_spawn = _parse_robot_spawn(task_data.get("initial_layout", {}))
+    initial_layout = task_data.get("initial_layout", {})
+    robot_spawn = _parse_robot_spawn(initial_layout)
     objects: dict[str, ObjectContractSpec] = {}
     for obj_raw in runtime_contract.get("objects", ()):
-        obj_spec = _parse_object_contract(obj_raw)
+        obj_spec = _parse_object_contract(obj_raw, initial_layout=initial_layout)
         objects[obj_spec.object_id] = obj_spec
+
+    art_uids = {
+        uid
+        for uid, entry in initial_layout.items()
+        if isinstance(entry, Mapping) and entry.get("type") == "articulation"
+    }
+    part_ids = tuple(
+        sorted(
+            str(uid)
+            for uid, entry in initial_layout.items()
+            if isinstance(entry, Mapping)
+            and entry.get("type") == "object"
+            and uid not in objects
+            and (
+                bool(entry.get("is_articulation_part", False))
+                or any(str(uid).startswith(f"{aid}_") for aid in art_uids)
+            )
+        )
+    )
 
     stages = _parse_stages(task_data.get("goal", []), runtime_contract)
     runtime_reqs = manifest.get("runtime_requirements", {})
@@ -213,6 +256,7 @@ def load_genmanip_collected_package(package_dir: Path) -> ScenarioIntakeBrief:
         robot_spawn=robot_spawn,
         objects=objects,
         stages=stages,
+        part_ids=part_ids,
     )
 
 

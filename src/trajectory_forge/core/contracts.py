@@ -233,6 +233,7 @@ class ScenarioIntakeBrief:
     robot_spawn: RobotSpawnSpec
     objects: dict[str, ObjectContractSpec]
     stages: tuple[StageContractSpec, ...]
+    part_ids: tuple[str, ...] = ()
     schema_version: str = "trajectory-forge-intake-brief/v0.1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -246,6 +247,7 @@ class ScenarioIntakeBrief:
             "robot_spawn": self.robot_spawn.to_dict(),
             "objects": {k: v.to_dict() for k, v in self.objects.items()},
             "stages": [s.to_dict() for s in self.stages],
+            "part_ids": list(self.part_ids),
         }
 
     @classmethod
@@ -265,6 +267,7 @@ class ScenarioIntakeBrief:
                 for k, v in data.get("objects", {}).items()
             },
             stages=tuple(StageContractSpec.from_dict(s) for s in data.get("stages", ())),
+            part_ids=tuple(str(p) for p in data.get("part_ids", ())),
         )
 
 
@@ -642,6 +645,7 @@ class RolloutJobRequest:
     controller_code: str
     max_steps: int = 2000
     resume_from_snapshot_id: str | None = None
+    render_media: bool = False
     schema_version: str = "trajectory-forge-rollout-rpc/v0.1"
 
     def __post_init__(self) -> None:
@@ -666,6 +670,7 @@ class RolloutJobRequest:
             "controller_code": self.controller_code,
             "max_steps": self.max_steps,
             "resume_from_snapshot_id": self.resume_from_snapshot_id,
+            "render_media": self.render_media,
         }
 
     @classmethod
@@ -682,6 +687,7 @@ class RolloutJobRequest:
             controller_code=str(data["controller_code"]),
             max_steps=int(data.get("max_steps", 2000)),
             resume_from_snapshot_id=data.get("resume_from_snapshot_id"),
+            render_media=bool(data.get("render_media", False)),
         )
 
 
@@ -700,6 +706,8 @@ class RolloutJobResult:
     diagnostics: SolvabilityDiagnostics = field(default_factory=SolvabilityDiagnostics)
     media: tuple[MediaArtifactRef, ...] = ()
     trajectory_manifest: TrajectoryEpisodeManifest | None = None
+    saved_snapshots: tuple[SnapshotHandle, ...] = ()
+    state_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = "trajectory-forge-rollout-rpc/v0.1"
 
     def to_dict(self) -> dict[str, Any]:
@@ -720,11 +728,14 @@ class RolloutJobResult:
                 if self.trajectory_manifest is not None
                 else None
             ),
+            "saved_snapshots": [s.to_dict() for s in self.saved_snapshots],
+            "state_summary": dict(self.state_summary),
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> RolloutJobResult:
         raw_manifest = data.get("trajectory_manifest")
+        raw_state = data.get("state_summary", {})
         return cls(
             schema_version=str(
                 data.get("schema_version", "trajectory-forge-rollout-rpc/v0.1")
@@ -746,4 +757,8 @@ class RolloutJobResult:
                 if isinstance(raw_manifest, Mapping)
                 else None
             ),
+            saved_snapshots=tuple(
+                SnapshotHandle.from_dict(s) for s in data.get("saved_snapshots", ())
+            ),
+            state_summary=dict(raw_state) if isinstance(raw_state, Mapping) else {},
         )

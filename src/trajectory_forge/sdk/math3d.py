@@ -120,8 +120,79 @@ class Pose3D:
     def from_spec(cls, spec: PoseSpec) -> Pose3D:
         return cls(xyz=spec.xyz, wxyz=normalize_quat_wxyz(spec.wxyz))
 
+    @classmethod
+    def from_approach(
+        cls,
+        *,
+        xyz: Vec3,
+        approach_dir: Vec3,
+        closing_dir: Vec3,
+    ) -> Pose3D:
+        """Build an orthonormal gripper TCP pose with +Z along approach_dir and +Y along closing_dir."""
+        z_axis = normalize_vec3(approach_dir)
+        # Gram-Schmidt orthogonalize closing_dir against approach_dir -> +Y axis, +X = +Y x +Z
+        dot = closing_dir[0] * z_axis[0] + closing_dir[1] * z_axis[1] + closing_dir[2] * z_axis[2]
+        y_raw = (
+            closing_dir[0] - dot * z_axis[0],
+            closing_dir[1] - dot * z_axis[1],
+            closing_dir[2] - dot * z_axis[2],
+        )
+        y_norm_sq = y_raw[0] * y_raw[0] + y_raw[1] * y_raw[1] + y_raw[2] * y_raw[2]
+        if y_norm_sq <= 1e-10:
+            raise ContractValidationError("approach_dir and closing_dir must not be collinear")
+        y_axis = normalize_vec3(y_raw)
+        x_axis = (
+            y_axis[1] * z_axis[2] - y_axis[2] * z_axis[1],
+            y_axis[2] * z_axis[0] - y_axis[0] * z_axis[2],
+            y_axis[0] * z_axis[1] - y_axis[1] * z_axis[0],
+        )
+        wxyz = quat_from_rotation_matrix(x_axis, y_axis, z_axis)
+        return cls(xyz=(float(xyz[0]), float(xyz[1]), float(xyz[2])), wxyz=wxyz)
+
     def to_spec(self) -> PoseSpec:
         return PoseSpec(xyz=self.xyz, wxyz=normalize_quat_wxyz(self.wxyz))
+
+
+def quat_from_rotation_matrix(col_x: Vec3, col_y: Vec3, col_z: Vec3) -> QuatWXYZ:
+    """Convert 3 orthonormal basis column vectors into a unit wxyz quaternion."""
+    m00, m10, m20 = col_x
+    m01, m11, m21 = col_y
+    m02, m12, m22 = col_z
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * s
+        x = (m21 - m12) / s
+        y = (m02 - m20) / s
+        z = (m10 - m01) / s
+    elif m00 > m11 and m00 > m22:
+        s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        w = (m21 - m12) / s
+        x = 0.25 * s
+        y = (m01 + m10) / s
+        z = (m02 + m20) / s
+    elif m11 > m22:
+        s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        w = (m02 - m20) / s
+        x = (m01 + m10) / s
+        y = 0.25 * s
+        z = (m12 + m21) / s
+    else:
+        s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+        w = (m10 - m01) / s
+        x = (m02 + m20) / s
+        y = (m12 + m21) / s
+        z = 0.25 * s
+    return normalize_quat_wxyz((w, x, y, z))
+
+
+def quat_angle_deg(q0: QuatWXYZ, q1: QuatWXYZ) -> float:
+    """Shortest angular difference in degrees between two unit quaternions."""
+    a = normalize_quat_wxyz(q0)
+    b = normalize_quat_wxyz(q1)
+    dot = abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3])
+    dot = min(1.0, max(-1.0, dot))
+    return math.degrees(2.0 * math.acos(dot))
 
 
 def compose_pose(parent: Pose3D, local: Pose3D) -> Pose3D:

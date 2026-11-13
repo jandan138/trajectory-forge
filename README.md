@@ -66,8 +66,21 @@ TF_WORKER_TOKEN=change-me PYTHONPATH=src python -m trajectory_forge.cli worker s
 ```bash
 make ci-check   # pure unit, boundary, RPC, ruff lint, and CLI smoke tests
 make check      # additionally runs @pytest.mark.local_artifacts tests against r3 packages
+make type       # mypy strict-ish type check across src/
 ```
+
+## Live Isaac Sim 4.1 Verification (`r3` Out-of-Domain Suite)
+
+Verified end-to-end over `--backend ssh-isaac-genmanip` against `scenario-forge`'s `r3` packages (`manip/lift2/R5a` + CUDA CuRobo):
+
+- **Closed-loop solve (`solve` -> `privileged_search` -> `full_horizon_gate` -> `trajectory_synthesis`)**:
+  - Run with `PYTHONPATH=src python -m trajectory_forge.cli solve --package <pkg> --embodiment configs/embodiments/lift2_r5a_bimanual.yaml --controller <ctrl.py> --backend ssh-isaac-genmanip --max-steps 2500 --max-attempts 1`.
+  - **`electronics_qa_ingun_probe_lock`**: **Full `0.00 -> 1.00` pass** (`5/5` stages held at episode end in `1757` continuous steps from `t=0`, `snapshots_used=0`, `firewall_verified=True`), exporting clean `.npz` (`privileged_channels_recorded=False`) + `1280x720` H.264 MP4 & keyframe PNGs.
+- **Partial stage verification & automated `SolvabilityDiagnostics`**:
+  - **`specialty_coffee_bar_creatista_prep`**: Stages `0–2` verified (`final_score=0.50`, `steps_executed=1119`); Stage `3` automatically emits `UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT` (`creatista_machine.brew_lever` / `BrewLeverJoint` `damping=12.00 N*m*s/deg`).
+  - **`modern_office_brother_calibrate`**: Stages `1` & `4` (`paper_cassette=-0.0031 m`, `button_start=-0.00226 m`) verified in `967` steps; Stage `0` automatically emits `UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE` (`a5_media_pack` `0.122 m x 0.160 m` exceeds `0.088 m` max parallel-jaw aperture).
 
 See also:
 - [v0.1 Architecture & Privileged Mode Contract](docs/design/architecture-v0.1.md)
 - [Google AI Ultra Cloud Brain to RTX 4090 Sim Worker Workflow](docs/operations/ultra-cloud-to-4090-worker-workflow.md)
+- [2026-11-13 `r3` Privileged Mode Live Verification Record](docs/records/2026-11-13-r3-privileged-mode-live-verification.md)

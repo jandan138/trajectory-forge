@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from numpy.typing import NDArray
 from omni.isaac.core.utils.types import ArticulationAction
 from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
 from scipy.spatial.transform import Rotation as R
@@ -42,7 +43,7 @@ _M_TCP_TO_LINK6 = np.array(
 _LINK6_TO_TCP_OFFSET_M = 0.135
 
 
-def _pose_to_mat(xyz: Sequence[float], wxyz: Sequence[float]) -> np.ndarray:
+def _pose_to_mat(xyz: Sequence[float], wxyz: Sequence[float]) -> NDArray[Any]:
     mat = np.eye(4, dtype=float)
     q_xyzw = np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]], dtype=float)
     mat[:3, :3] = R.from_quat(q_xyzw).as_matrix()
@@ -50,14 +51,14 @@ def _pose_to_mat(xyz: Sequence[float], wxyz: Sequence[float]) -> np.ndarray:
     return mat
 
 
-def _mat_to_pose(mat: np.ndarray) -> Pose3D:
+def _mat_to_pose(mat: NDArray[Any]) -> Pose3D:
     q_xyzw = R.from_matrix(mat[:3, :3]).as_quat()
     wxyz = normalize_quat_wxyz((float(q_xyzw[3]), float(q_xyzw[0]), float(q_xyzw[1]), float(q_xyzw[2])))
     xyz = (float(mat[0, 3]), float(mat[1, 3]), float(mat[2, 3]))
     return Pose3D(xyz=xyz, wxyz=wxyz)
 
 
-def tcp_world_to_link6_world(tcp_pose: Pose3D) -> tuple[np.ndarray, np.ndarray]:
+def tcp_world_to_link6_world(tcp_pose: Pose3D) -> tuple[NDArray[Any], NDArray[Any]]:
     """Convert desired TCP pose (+Z approach, +Y jaw close) to R5a link6 world pose."""
     q_xyzw = np.array([tcp_pose.wxyz[1], tcp_pose.wxyz[2], tcp_pose.wxyz[3], tcp_pose.wxyz[0]], dtype=float)
     rot_tcp = R.from_quat(q_xyzw).as_matrix()
@@ -69,7 +70,7 @@ def tcp_world_to_link6_world(tcp_pose: Pose3D) -> tuple[np.ndarray, np.ndarray]:
     return p_link6, q_l6_wxyz
 
 
-def link6_world_to_tcp_world(p_link6: np.ndarray, q_link6_wxyz: np.ndarray) -> Pose3D:
+def link6_world_to_tcp_world(p_link6: NDArray[Any], q_link6_wxyz: NDArray[Any]) -> Pose3D:
     """Convert R5a link6 world pose to fingertip TCP Pose3D."""
     q_xyzw = np.array([q_link6_wxyz[1], q_link6_wxyz[2], q_link6_wxyz[3], q_link6_wxyz[0]], dtype=float)
     rot_link6 = R.from_quat(q_xyzw).as_matrix()
@@ -86,7 +87,7 @@ def link6_world_to_tcp_world(p_link6: np.ndarray, q_link6_wxyz: np.ndarray) -> P
 
 
 def fix_lift2_finger_collider_offsets(stage: Usd.Stage, robot_prim_path: str) -> int:
-    """Fix R5a finger collision restOffset >= contactOffset PhysX warnings in-memory."""
+    """Fix R5a finger collision restOffset >= contactOffset PhysX warnings and friction in-memory."""
     updated = 0
     for prim in stage.Traverse():
         pstr = str(prim.GetPath())
@@ -102,6 +103,18 @@ def fix_lift2_finger_collider_offsets(stage: Usd.Stage, robot_prim_path: str) ->
                 p_api.CreateContactOffsetAttr(0.004)
                 p_api.CreateRestOffsetAttr(0.0005)
                 updated += 1
+        elif prim.GetName() == "PhysicsMaterial" or prim.HasAPI(UsdPhysics.MaterialAPI):
+            mat_api = UsdPhysics.MaterialAPI.Apply(prim)
+            s_attr = prim.GetAttribute("physics:staticFriction")
+            d_attr = prim.GetAttribute("physics:dynamicFriction")
+            s_val = float(s_attr.Get()) if s_attr and s_attr.HasValue() and s_attr.Get() is not None else 0.0
+            d_val = float(d_attr.Get()) if d_attr and d_attr.HasValue() and d_attr.Get() is not None else 0.0
+            if s_val < 0.8:
+                mat_api.CreateStaticFrictionAttr(0.8)
+            if d_val < 0.8:
+                mat_api.CreateDynamicFrictionAttr(0.8)
+            p_mat_api = PhysxSchema.PhysxMaterialAPI.Apply(prim)
+            p_mat_api.CreateImprovePatchFrictionAttr(True)
     return updated
 
 
@@ -207,6 +220,7 @@ class IsaacGenManipSimBackend:
 
         # Robot target hold registers so stepping one chain/group holds everything else rock steady.
         full_q = np.asarray(self.emb.robot.get_joint_positions(), dtype=float)
+        self._full_dof_targets = full_q.copy()
         self._target_16dof = np.asarray(full_q[self.emb.default_dof_indices], dtype=float).copy()
         self._target_lift = float(full_q[self.emb.body_dof_indices[0]])
         if not hasattr(self.emb, "target_base_pose") or self.emb.target_base_pose is None:
@@ -231,6 +245,11 @@ class IsaacGenManipSimBackend:
             [UsdGeom.Tokens.default_, UsdGeom.Tokens.proxy, UsdGeom.Tokens.render],
             useExtentsHint=False,
         )
+        self._guide_bbox_cache = UsdGeom.BBoxCache(
+            Usd.TimeCode.Default(),
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.proxy, UsdGeom.Tokens.render, UsdGeom.Tokens.guide],
+            useExtentsHint=False,
+        )
         self._xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
 
         # Sequential stage tracking
@@ -238,14 +257,21 @@ class IsaacGenManipSimBackend:
         self.stage_progression: list[StageProgressEntry] = []
 
         # Recording buffers (firewall clean: ONLY non-privileged sensorimotor channels + render media)
-        self._traj_proprio: list[np.ndarray] = []
-        self._traj_action: list[np.ndarray] = []
-        self._traj_base_target: list[np.ndarray] = []
+        self._traj_proprio: list[NDArray[Any]] = []
+        self._traj_action: list[NDArray[Any]] = []
+        self._traj_base_target: list[NDArray[Any]] = []
         self._traj_torso_lift: list[float] = []
         self._traj_timestamps: list[float] = []
-        self._traj_rgb_frames: list[np.ndarray] = []
-        self._media_keyframes: list[tuple[str, str, np.ndarray]] = []
-        self._video_frames: list[np.ndarray] = []
+        self._traj_rgb_frames: list[NDArray[Any]] = []
+        self._media_keyframes: list[tuple[str, str, NDArray[Any]]] = []
+        self._video_frames: list[NDArray[Any]] = []
+
+        rob_pos0, _ = self.emb.robot.get_world_pose()
+        p_l0, q_l0 = self.emb.robot_base_left.get_world_pose()
+        p_r0, _ = self.emb.robot_base_right.get_world_pose()
+        mid_init = 0.5 * (np.asarray(p_l0, dtype=float) + np.asarray(p_r0, dtype=float))
+        rot_l_init = R.from_quat([float(q_l0[1]), float(q_l0[2]), float(q_l0[3]), float(q_l0[0])])
+        self._mid_to_root_local = rot_l_init.inv().apply(np.asarray(rob_pos0, dtype=float) - mid_init)
 
         self._t0_snapshot_blob = self._capture_snapshot_blob()
         if self.render_camera is not None:
@@ -331,6 +357,7 @@ class IsaacGenManipSimBackend:
         self.emb.robot.set_joint_positions(rob_q)
         if hasattr(self.emb.robot, "set_joint_velocities"):
             self.emb.robot.set_joint_velocities(np.zeros_like(rob_q))
+        self._full_dof_targets = rob_q.copy()
         self._target_16dof = np.asarray(rob["target_16dof"], dtype=float).copy()
         self._target_lift = float(rob["target_lift"])
         self.emb.target_base_pose = np.asarray(rob["target_base_pose"], dtype=float).copy()
@@ -436,6 +463,9 @@ class IsaacGenManipSimBackend:
         self._bbox_cache.Clear()
         bound = self._bbox_cache.ComputeWorldBound(prim)
         aligned = bound.ComputeAlignedBox()
+        if aligned.IsEmpty():
+            self._guide_bbox_cache.Clear()
+            aligned = self._guide_bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
         mn = aligned.GetMin()
         mx = aligned.GetMax()
         return AABB3D(
@@ -608,16 +638,16 @@ class IsaacGenManipSimBackend:
             np.asarray(pose_l6.wxyz, dtype=float),
         )
 
-    def _cur_16dof(self) -> np.ndarray:
+    def _cur_16dof(self) -> NDArray[Any]:
         full_q = np.asarray(self.emb.robot.get_joint_positions(), dtype=float)
-        return full_q[self.emb.default_dof_indices]
+        return np.asarray(full_q[self.emb.default_dof_indices], dtype=float)
 
     def _solve_ik_internal(
         self,
         chain: str,
         target_pose: Pose3D,
-        seed_6dof: np.ndarray | None = None,
-    ) -> np.ndarray:
+        seed_6dof: NDArray[Any] | None = None,
+    ) -> NDArray[Any]:
         planner, sl, arm = self._planner_and_slice(chain)
         p_l6, q_l6 = tcp_world_to_link6_world(target_pose)
         p_arm, q_arm = self.emb._transform_goal_pose((p_l6, q_l6), arm=arm)
@@ -650,20 +680,14 @@ class IsaacGenManipSimBackend:
         return tuple(float(v) for v in sol)
 
     def _apply_robot_targets(self) -> None:
-        self.emb.robot_view.set_joint_position_targets(
-            self._target_16dof.tolist(),
-            joint_indices=self.emb.default_dof_indices,
+        self._full_dof_targets[self.emb.default_dof_indices] = self._target_16dof
+        self._full_dof_targets[self.emb.body_dof_indices] = [float(self._target_lift)]
+        self._full_dof_targets[self.emb.base_dof_indices] = np.asarray(
+            self.emb.target_base_pose, dtype=float
         )
-        self.emb.robot_view.set_joint_position_targets(
-            [float(self._target_lift)],
-            joint_indices=self.emb.body_dof_indices,
-        )
-        self.emb.robot_view.set_joint_position_targets(
-            np.asarray(self.emb.target_base_pose, dtype=float).tolist(),
-            joint_indices=self.emb.base_dof_indices,
-        )
+        self.emb.robot_view.set_joint_position_targets(self._full_dof_targets.tolist())
 
-    def _grab_camera_rgb(self, accum_renders: int = 1) -> np.ndarray | None:
+    def _grab_camera_rgb(self, accum_renders: int = 1) -> NDArray[Any] | None:
         if self.render_camera is None:
             return None
         from genmanip.utils.usd_utils.camera_utils import get_src
@@ -774,18 +798,22 @@ class IsaacGenManipSimBackend:
         start_pose = self.ee_pose(chain)
         num_ik_pts = max(2, min(12, max(2, steps // 5)))
         seed_q = self._target_16dof[sl].copy()
-        ik_path: list[np.ndarray] = []
-        for idx in range(1, num_ik_pts + 1):
-            alpha = idx / num_ik_pts
-            xyz = (
-                start_pose.xyz[0] + alpha * (target_pose.xyz[0] - start_pose.xyz[0]),
-                start_pose.xyz[1] + alpha * (target_pose.xyz[1] - start_pose.xyz[1]),
-                start_pose.xyz[2] + alpha * (target_pose.xyz[2] - start_pose.xyz[2]),
-            )
-            wxyz = slerp_wxyz(start_pose.wxyz, target_pose.wxyz, alpha)
-            q_wp = self._solve_ik_internal(chain, Pose3D(xyz=xyz, wxyz=wxyz), seed_q)
-            ik_path.append(q_wp)
-            seed_q = q_wp
+        ik_path: list[NDArray[Any]] = []
+        try:
+            for idx in range(1, num_ik_pts + 1):
+                alpha = idx / num_ik_pts
+                xyz = (
+                    start_pose.xyz[0] + alpha * (target_pose.xyz[0] - start_pose.xyz[0]),
+                    start_pose.xyz[1] + alpha * (target_pose.xyz[1] - start_pose.xyz[1]),
+                    start_pose.xyz[2] + alpha * (target_pose.xyz[2] - start_pose.xyz[2]),
+                )
+                wxyz = slerp_wxyz(start_pose.wxyz, target_pose.wxyz, alpha)
+                q_wp = self._solve_ik_internal(chain, Pose3D(xyz=xyz, wxyz=wxyz), seed_q)
+                ik_path.append(q_wp)
+                seed_q = q_wp
+        except RuntimeError:
+            q_goal = self._solve_ik_internal(chain, target_pose, self._target_16dof[sl].copy())
+            ik_path = [q_goal]
 
         self._execute_joint_waypoints(sl, ik_path, total_steps=steps)
         return tuple(float(v) for v in self._target_16dof[sl])
@@ -799,7 +827,7 @@ class IsaacGenManipSimBackend:
     ) -> tuple[float, ...]:
         _, sl, _ = self._planner_and_slice(chain)
         seed_q = self._target_16dof[sl].copy()
-        ik_path: list[np.ndarray] = []
+        ik_path: list[NDArray[Any]] = []
         for pose in poses:
             q_wp = self._solve_ik_internal(chain, pose, seed_q)
             ik_path.append(q_wp)
@@ -810,7 +838,7 @@ class IsaacGenManipSimBackend:
     def _execute_joint_waypoints(
         self,
         sl: slice,
-        waypoints: Sequence[np.ndarray],
+        waypoints: Sequence[NDArray[Any]],
         *,
         total_steps: int,
     ) -> None:
@@ -849,12 +877,12 @@ class IsaacGenManipSimBackend:
         *,
         steps: int = 30,
     ) -> tuple[float, float, float]:
-        # Transform world displacement into robot-root local frame because base dummy joints live under robot root
-        _, rob_ori = self.emb.robot.get_world_pose()
-        q_xyzw = np.array([rob_ori[1], rob_ori[2], rob_ori[3], rob_ori[0]], dtype=float)
+        # Transform world displacement into robot frame; lift2's base_joint_y has inverted local axis sign.
+        bp_now = self.base_pose_world()
+        q_xyzw = np.array([bp_now.wxyz[1], bp_now.wxyz[2], bp_now.wxyz[3], bp_now.wxyz[0]], dtype=float)
         rot_root = R.from_quat(q_xyzw).as_matrix()
         d_local = rot_root.T @ np.array([dx_m, dy_m, 0.0], dtype=float)
-        dx_l, dy_l = float(d_local[0]), float(d_local[1])
+        dx_l, dy_l = float(d_local[0]), -float(d_local[1])
         min_steps = int(
             math.ceil(max(abs(dx_l) / 0.01, abs(dy_l) / 0.01, abs(dyaw_deg) / 0.8, 1.0))
         )
@@ -867,25 +895,24 @@ class IsaacGenManipSimBackend:
         return bp.xyz
 
     def base_pose_world(self) -> Pose3D:
-        rob_pos, rob_ori = self.emb.robot.get_world_pose()
-        full_q = np.asarray(self.emb.robot.get_joint_positions(), dtype=float)
-        local_base = full_q[self.emb.base_dof_indices]
-        q_xyzw = np.array([rob_ori[1], rob_ori[2], rob_ori[3], rob_ori[0]], dtype=float)
-        rot_root = R.from_quat(q_xyzw)
-        world_delta = rot_root.apply(np.array([local_base[0], local_base[1], 0.0], dtype=float))
-        rot_total = rot_root * R.from_euler("z", float(local_base[2]), degrees=False)
-        q_tot = rot_total.as_quat()
+        rob_pos, _ = self.emb.robot.get_world_pose()
+        p_l, q_l = self.emb.robot_base_left.get_world_pose()
+        p_r, _ = self.emb.robot_base_right.get_world_pose()
+        mid_now = 0.5 * (np.asarray(p_l, dtype=float) + np.asarray(p_r, dtype=float))
+        rot_l_now = R.from_quat([float(q_l[1]), float(q_l[2]), float(q_l[3]), float(q_l[0])])
+        pos_now = mid_now + rot_l_now.apply(self._mid_to_root_local)
+        q_tot = rot_l_now.as_quat()
         return Pose3D(
             xyz=(
-                float(rob_pos[0] + world_delta[0]),
-                float(rob_pos[1] + world_delta[1]),
+                float(pos_now[0]),
+                float(pos_now[1]),
                 float(rob_pos[2]),
             ),
             wxyz=normalize_quat_wxyz((float(q_tot[3]), float(q_tot[0]), float(q_tot[1]), float(q_tot[2]))),
         )
 
     def set_torso_lift(self, height_m: float, *, steps: int = 20) -> float:
-        clamped = float(min(0.72, max(0.05, height_m)))
+        clamped = float(min(0.46, max(0.0, height_m)))
         start = float(self._target_lift)
         n_steps = max(1, int(steps))
         for idx in range(1, n_steps + 1):
@@ -934,6 +961,97 @@ class IsaacGenManipSimBackend:
         for _ in range(int(steps)):
             self._step_one_tick()
         self._evaluate_metrics_tick(force=True)
+
+    def diagnose_blocking_stage(self, state_summary: Mapping[str, Any]) -> tuple[str, str, str]:
+        """Classify upstream physical blockers at the first incomplete stage."""
+        blk = state_summary.get("blocking_stage")
+        final_score = float(self.live_current_score())
+        default_detail = (
+            f"Controller finished with final_score={final_score:.4f}; "
+            f"blocking_stage={blk}; stage_scores={state_summary.get('stage_scores')}"
+        )
+        if blk is None or not (0 <= int(blk) < len(self.brief.stages)):
+            return ("STAGE_INCOMPLETE", default_detail, "")
+
+        stage_spec = self.brief.stages[int(blk)]
+        for clause in stage_spec.clauses:
+            ctype = str(clause.get("type", ""))
+            obj_uid = str(clause.get("obj1_uid", ""))
+            if ctype == "manip/default/sr_based_genmanip_relationship":
+                obj_spec = self.brief.objects.get(obj_uid)
+                if obj_spec is None:
+                    continue
+                status_cfg = clause.get("status", [])
+                active_indices: dict[int, tuple[float, float]] = {}
+                if isinstance(status_cfg, (list, tuple)):
+                    for union_entry in status_cfg:
+                        if not isinstance(union_entry, (list, tuple)):
+                            continue
+                        for and_entry in union_entry:
+                            if not isinstance(and_entry, (list, tuple)):
+                                continue
+                            for idx, band in enumerate(and_entry):
+                                if (
+                                    isinstance(band, (list, tuple))
+                                    and len(band) == 2
+                                    and (float(band[0]) > -1e7 or float(band[1]) < 1e7)
+                                ):
+                                    active_indices[idx] = (float(band[0]), float(band[1]))
+                for jname, dof in obj_spec.dofs.items():
+                    if dof.dof_index not in active_indices:
+                        continue
+                    jprim = self._find_usd_joint_prim(obj_uid, dof.joint_prim)
+                    if jprim is None or not jprim.IsA(UsdPhysics.RevoluteJoint):
+                        continue
+                    damp_attr = jprim.GetAttribute("drive:angular:physics:damping")
+                    damping_val = (
+                        float(damp_attr.Get())
+                        if damp_attr is not None and damp_attr.HasValue()
+                        else 0.0
+                    )
+                    if damping_val > 2.0:
+                        si_equiv = damping_val * (180.0 / math.pi)
+                        cur_val = self.live_joint_value(obj_uid, jname)
+                        lo, hi = active_indices[dof.dof_index]
+                        return (
+                            "UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT",
+                            (
+                                f"Stage {blk} joint '{obj_uid}.{jname}' ({jprim.GetName()}) has "
+                                f"drive:angular:physics:damping={damping_val:.2f} N*m*s/deg "
+                                f"(~{si_equiv:.1f} N*m*s/rad in PhysX); observed {cur_val:.4f} rad "
+                                f"vs target band [{lo:.4f}, {hi:.4f}] rad."
+                            ),
+                            (
+                                f"In upstream asset USD ({obj_uid}), author UsdPhysics.DriveAPI "
+                                "angular damping in per-degree units (divide SI N*m*s/rad by "
+                                "180/pi = 57.2958, e.g. 0.15-0.45 N*m*s/deg matching IngunMA2111Fixture)."
+                            ),
+                        )
+            elif ctype == "manip/default/sr_based_genmanip_range":
+                if obj_uid in self.brief.objects and obj_uid not in self.scene.articulation_list:
+                    try:
+                        aabb = self.live_object_aabb(obj_uid)
+                    except KeyError:
+                        continue
+                    dx = float(aabb.max_xyz[0] - aabb.min_xyz[0])
+                    dy = float(aabb.max_xyz[1] - aabb.min_xyz[1])
+                    dz = float(aabb.max_xyz[2] - aabb.min_xyz[2])
+                    if dx > 0.088 and dy > 0.088:
+                        return (
+                            "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
+                            (
+                                f"Stage {blk} object '{obj_uid}' horizontal footprint "
+                                f"({dx:.3f} m x {dy:.3f} m, z={dz:.3f} m) exceeds lift2 max "
+                                "parallel-jaw gripper aperture 0.088 m."
+                            ),
+                            (
+                                f"Present '{obj_uid}' upright in a holder/tray, add a grasp "
+                                "standoff lip <=0.080 m wide, or keep shortest horizontal span "
+                                "<=0.080 m (matching pcba_carrier_board)."
+                            ),
+                        )
+
+        return ("STAGE_INCOMPLETE", default_detail, "")
 
     def finalize_outputs(self) -> tuple[list[MediaArtifactRef], str | None, dict[str, Any]]:
         """Save keyframes, MP4 progression video, optional .npz trajectory, and summary."""
@@ -1003,7 +1121,7 @@ class IsaacGenManipSimBackend:
 
                         writer = cv2.VideoWriter(
                             str(vid_path),
-                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            int(getattr(cv2, "VideoWriter_fourcc")(*"mp4v")),
                             15.0,
                             (w, h),
                         )

@@ -277,13 +277,11 @@ def run_job(
 
         media_refs, artifact_relpath, state_summary = backend.finalize_outputs()
         final_score = float(backend.live_current_score())
+        remediation_hint = ""
         if status == "succeeded" and final_score < 0.9999:
             status = "failed"
-            failure_code = "STAGE_INCOMPLETE"
-            blk = state_summary.get("blocking_stage")
-            failure_detail = (
-                f"Controller finished with final_score={final_score:.4f}; "
-                f"blocking_stage={blk}; stage_scores={state_summary.get('stage_scores')}"
+            failure_code, failure_detail, remediation_hint = backend.diagnose_blocking_stage(
+                state_summary
             )
 
         firewall_verified = (
@@ -325,6 +323,7 @@ def run_job(
                 failure_code=failure_code,
                 stage_index=state_summary.get("blocking_stage") if status != "succeeded" else None,
                 detail=failure_detail,
+                upstream_remediation_hint=remediation_hint,
             ),
             media=tuple(media_refs),
             trajectory_manifest=traj_manifest,

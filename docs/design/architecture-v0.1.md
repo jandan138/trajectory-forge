@@ -45,12 +45,16 @@ While `v0.1` targets `lift2_r5a_bimanual` (16-DOF dual 6-DOF arms + dual 2-finge
 
 ---
 
-## 4. `v0.1` Acceptance Target: `scenario-forge` `r3` Out-of-Domain Suite
+## 4. `v0.1` Closed-Loop Solver, Diagnostics & `r3` Live Verification
 
-Tracked in `configs/benchmarks/r3_out_of_domain_suite.yaml`:
+- **`PrivilegedSolverHarness` (`cli solve`)**: Orchestrates iterative controller synthesis/repair (`privileged_search`, snapshot checkpointing permitted) -> zero-snapshot continuous `t=0` gate (`full_horizon_gate`, `FirewallViolationError` on any snapshot save/restore/resume) -> sensorimotor export (`trajectory_synthesis`, writing `episode_trajectory.npz` with `privileged_channels_recorded=False`, `proprio`, `action`, `base_target`, `torso_lift`, `timestamps_s`, `rgb_head`).
+- **Executor Backends**: Supports `dry-run`, `isaac-genmanip`, `ssh-isaac-genmanip` (`SSHIsaacGenManipExecutor` running real Isaac Sim 4.1 + `GenManip` + CUDA CuRobo remotely over SSH), and `http-worker`.
+- **Automated `SolvabilityDiagnostics`**: Distinguishes physical USD/asset blockers from controller errors (`UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT` when `drive:angular:physics:damping > 2.0 N*m*s/deg` causes >114.6 N*m*s/rad PhysX torque; `UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE` when an ungraspable object's horizontal footprint exceeds `0.088 m`).
 
-| Task ID | Domain | Hero Object & Key DOFs | Target Stages | Goal |
+Tracked in `configs/benchmarks/r3_out_of_domain_suite.yaml` (detailed live run metrics in [2026-11-13-r3-privileged-mode-live-verification.md](../records/2026-11-13-r3-privileged-mode-live-verification.md)):
+
+| Task ID | Domain | Hero Object & Key DOFs | Target Stages | Verified Live Status (Isaac Sim 4.1) |
 |---|---|---|---|---|
-| `specialty_coffee_bar_creatista_prep` | `specialty_coffee_bar` | `creatista_machine` (`drip_tray`, `brew_lever`, `select_dial`, `dial_press`) | 6 | Continuous `0.00 -> 1.00` on `lift2` |
-| `electronics_qa_ingun_probe_lock` | `electronics_qa_station` | `ingun_fixture` (`pressure_hood`, `clamp_lever`, `mode_toggle`) | 5 | Continuous `0.00 -> 1.00` on `lift2` |
-| `modern_office_brother_calibrate` | `modern_office_print_hub` | `brother_printer` (`paper_cassette`, `scanner_lid`) | 5 | Continuous `0.00 -> 1.00` on `lift2` |
+| `electronics_qa_ingun_probe_lock` | `electronics_qa_station` | `ingun_fixture` (`pressure_hood`, `clamp_lever`, `mode_toggle`, `test_start_button`) | 5 | **Solved `1.00` (`5/5` hold)**, `1757` steps, `snapshots_used=0`, `firewall_verified=True` |
+| `specialty_coffee_bar_creatista_prep` | `specialty_coffee_bar` | `creatista_machine` (`drip_tray`, `brew_lever`, `select_dial`, `dial_press`) | 6 | Stages `0–2` pass (`0.50`); Stage `3` blocked (`UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT`) |
+| `modern_office_brother_calibrate` | `modern_office_print_hub` | `brother_printer` (`paper_cassette`, `scanner_lid`, `button_start`) | 5 | Stages `1` & `4` pass physically; Stage `0` blocked (`UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE`) |

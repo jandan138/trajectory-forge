@@ -31,6 +31,7 @@ from trajectory_forge.intake.genmanip_intake import (
 )
 from trajectory_forge.sdk.context import run_controller_preflight
 from trajectory_forge.solver import (
+    ControllerSynthesizer,
     OpenAICompatibleSynthesizer,
     PrivilegedSolverHarness,
     SolveSessionConfig,
@@ -116,7 +117,7 @@ def _build_executor_from_args(args: argparse.Namespace) -> RolloutExecutor:
                 isaac_python=Path(args.isaac_python),
                 genmanip_root=Path(args.genmanip_root),
                 package_store_root=Path(args.package_store),
-                output_root=Path(args.output_root),
+                output_root=Path(args.output_root).resolve(),
                 curobo_src=Path(args.curobo_src),
                 timeout_s=float(args.timeout),
             )
@@ -132,7 +133,7 @@ def _build_executor_from_args(args: argparse.Namespace) -> RolloutExecutor:
                 remote_genmanip_root=Path(args.genmanip_root),
                 remote_curobo_src=Path(args.curobo_src),
                 package_store_root=Path(args.package_store),
-                output_root=Path(args.output_root),
+                output_root=Path(args.output_root).resolve(),
                 timeout_s=float(args.timeout),
             )
         )
@@ -229,6 +230,7 @@ def _cmd_solve(args: argparse.Namespace) -> int:
     pkg_path = Path(args.package)
     brief = load_genmanip_collected_package(pkg_path)
     package_ref = str(pkg_path.resolve())
+    synthesizer: ControllerSynthesizer
     if args.llm:
         synthesizer = OpenAICompatibleSynthesizer(
             api_base=args.llm_api_base,

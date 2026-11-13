@@ -94,3 +94,36 @@ job = RolloutJobRequest(
 result = client.submit_rollout(job)
 print(result.status, result.final_score, result.diagnostics)
 ```
+
+---
+
+## 4. Direct VPC SSH Backend (`--backend ssh-isaac-genmanip`)
+
+When the cloud/dev container and the RTX 4090 host (`root@10.150.168.71 -p 22`, key `~/.ssh/id_ed25519_github`) share `/cpfs`, you do not need to keep an HTTP worker daemon running:
+
+1. **Direct Closed-Loop Solve**:
+   ```bash
+   cd /cpfs/user/zhuzihou/dev/trajectory-forge && \
+   PYTHONPATH=src /cpfs/user/zhuzihou/conda-managed/envs/embodied-eval-os-py310/bin/python -m trajectory_forge.cli solve \
+     --package /cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/out_of_domain_factory_r3_20261113/packages/electronics_qa_ingun_probe_lock \
+     --embodiment configs/embodiments/lift2_r5a_bimanual.yaml \
+     --controller examples/controllers/r3/ingun_probe_lock_privileged.py \
+     --backend ssh-isaac-genmanip --max-steps 2500 --max-attempts 1 \
+     --render-gate-media \
+     --output-root /cpfs/user/zhuzihou/dev/trajectory-forge/external_artifacts/rollouts \
+     --report-out /cpfs/user/zhuzihou/dev/trajectory-forge/external_artifacts/rollouts/reports/solve_report.json
+   ```
+2. **Direct Single Rollout / Rendered Media / Snapshot Resume**:
+   ```bash
+   PYTHONPATH=src /cpfs/user/zhuzihou/conda-managed/envs/embodied-eval-os-py310/bin/python -m trajectory_forge.cli rollout run \
+     --package /cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/out_of_domain_factory_r3_20261113/packages/specialty_coffee_bar_creatista_prep \
+     --embodiment configs/embodiments/lift2_r5a_bimanual.yaml \
+     --controller examples/controllers/r3/creatista_prep_privileged.py \
+     --mode privileged_search --backend ssh-isaac-genmanip --max-steps 2500 \
+     --render-media \
+     --output-root /cpfs/user/zhuzihou/dev/trajectory-forge/external_artifacts/rollouts \
+     --job-id r3_creatista_final_media
+   ```
+3. **Operational Constraints**:
+   - **One Isaac Sim job at a time**: `10.150.168.71` runs a single 46 GB RTX 4090; run jobs sequentially to avoid VRAM contention and PhysX timing jitter.
+   - **Always pass `--output-root`** explicitly when invoking from another CWD so snapshot JSONs, job logs, rendered PNG/MP4 media, and exported `.npz` files land under `trajectory-forge/external_artifacts/rollouts`.

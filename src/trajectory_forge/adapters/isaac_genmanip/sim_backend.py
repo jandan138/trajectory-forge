@@ -18,8 +18,10 @@ from trajectory_forge.core.contracts import (
     EmbodimentCard,
     FirewallViolationError,
     MediaArtifactRef,
+    RemediationPolicySpec,
     ScenarioIntakeBrief,
     SnapshotHandle,
+    SolvabilityDiagnostics,
     StageProgressEntry,
 )
 from trajectory_forge.sdk.context import (
@@ -28,7 +30,16 @@ from trajectory_forge.sdk.context import (
     TactileReading,
     WrenchReading,
 )
-from trajectory_forge.sdk.math3d import Pose3D, normalize_quat_wxyz, slerp_wxyz
+from trajectory_forge.sdk.math3d import (
+    Pose3D,
+    normalize_quat_wxyz,
+    pose_from_named_frame,
+    slerp_wxyz,
+)
+from trajectory_forge.solver.diagnostics import (
+    apply_remediation_policy,
+    compute_sequential_blocking_stage,
+)
 
 
 # R5a link6 -> fingertip TCP rotation: R_y(+90 deg) @ R_z(180 deg) (symmetric orthogonal)
@@ -962,18 +973,79 @@ class IsaacGenManipSimBackend:
             self._step_one_tick()
         self._evaluate_metrics_tick(force=True)
 
-    def diagnose_blocking_stage(self, state_summary: Mapping[str, Any]) -> tuple[str, str, str]:
+    def _object_has_grasp_handle_or_overhang(
+        self, obj_uid: str, dz: float, aabb: AABB3D
+    ) -> bool:
+        obj_spec = self.brief.objects.get(obj_uid)
+        if (
+            obj_spec is not None
+            and "grasp" in obj_spec.named_frames
+            and obj_uid in self.scene.object_list
+        ):
+            obj_pose = self.live_object_pose(obj_uid)
+            grasp_pt = np.asarray(
+                pose_from_named_frame(
+                    obj_spec, "grasp", object_world_pose=obj_pose
+                ).xyz,
+                dtype=float,
+            )
+            prim_path = str(
+                getattr(self.scene.object_list[obj_uid], "prim_path", "") or ""
+            )
+            obj_prim = (
+                self.scene.world.stage.GetPrimAtPath(prim_path)
+                if prim_path
+                else None
+            )
+            if obj_prim and obj_prim.IsValid():
+                self._guide_bbox_cache.Clear()
+                for desc in Usd.PrimRange(obj_prim):
+                    if not desc.HasAPI(UsdPhysics.CollisionAPI):
+                        continue
+                    en = UsdPhysics.CollisionAPI(desc).GetCollisionEnabledAttr().Get()
+                    if en is False:
+                        continue
+                    box = self._guide_bbox_cache.ComputeWorldBound(desc).ComputeAlignedBox()
+                    if box.IsEmpty():
+                        continue
+                    cmin = np.asarray(box.GetMin(), dtype=float)
+                    cmax = np.asarray(box.GetMax(), dtype=float)
+                    cdx = float(cmax[0] - cmin[0])
+                    cdy = float(cmax[1] - cmin[1])
+                    outside = np.maximum(0.0, np.maximum(cmin - grasp_pt, grasp_pt - cmax))
+                    if float(np.max(outside)) <= 0.005 and (cdx <= 0.080 or cdy <= 0.080):
+                        return True
+        if dz <= 0.080 and (
+            aabb.min_xyz[0] < -1.020
+            or aabb.max_xyz[0] > 1.020
+            or aabb.min_xyz[1] < -0.420
+            or aabb.max_xyz[1] > 0.420
+        ):
+            return True
+        return False
+
+    def diagnose_blocking_stage(
+        self,
+        state_summary: Mapping[str, Any],
+        remediation_policy: RemediationPolicySpec | None = None,
+    ) -> SolvabilityDiagnostics:
         """Classify upstream physical blockers at the first incomplete stage."""
+        policy = remediation_policy or RemediationPolicySpec()
         blk = state_summary.get("blocking_stage")
         final_score = float(self.live_current_score())
         default_detail = (
             f"Controller finished with final_score={final_score:.4f}; "
             f"blocking_stage={blk}; stage_scores={state_summary.get('stage_scores')}"
         )
-        if blk is None or not (0 <= int(blk) < len(self.brief.stages)):
-            return ("STAGE_INCOMPLETE", default_detail, "")
+        blk_idx = int(blk) if isinstance(blk, int) else None
+        if blk_idx is None or not (0 <= blk_idx < len(self.brief.stages)):
+            return SolvabilityDiagnostics(
+                failure_code="STAGE_INCOMPLETE",
+                stage_index=blk_idx,
+                detail=default_detail,
+            )
 
-        stage_spec = self.brief.stages[int(blk)]
+        stage_spec = self.brief.stages[blk_idx]
         for clause in stage_spec.clauses:
             ctype = str(clause.get("type", ""))
             obj_uid = str(clause.get("obj1_uid", ""))
@@ -1001,7 +1073,60 @@ class IsaacGenManipSimBackend:
                     if dof.dof_index not in active_indices:
                         continue
                     jprim = self._find_usd_joint_prim(obj_uid, dof.joint_prim)
-                    if jprim is None or not jprim.IsA(UsdPhysics.RevoluteJoint):
+                    if jprim is None:
+                        continue
+                    if jprim.IsA(UsdPhysics.PrismaticJoint):
+                        cur_val = self.live_joint_value(obj_uid, jname)
+                        lo, hi = active_indices[dof.dof_index]
+                        body1_targets = jprim.GetRelationship("physics:body1").GetTargets()
+                        if body1_targets and abs(cur_val) < 0.015 and (lo > 0.05 or hi < -0.05):
+                            b1_prim = self.scene.world.stage.GetPrimAtPath(body1_targets[0])
+                            if b1_prim and b1_prim.IsValid():
+                                self._guide_bbox_cache.Clear()
+                                col_mins: list[NDArray[Any]] = []
+                                col_maxs: list[NDArray[Any]] = []
+                                for desc in Usd.PrimRange(b1_prim):
+                                    if desc.HasAPI(UsdPhysics.CollisionAPI):
+                                        box = self._guide_bbox_cache.ComputeWorldBound(desc).ComputeAlignedBox()
+                                        if not box.IsEmpty():
+                                            col_mins.append(np.asarray(box.GetMin(), dtype=float))
+                                            col_maxs.append(np.asarray(box.GetMax(), dtype=float))
+                                if col_mins:
+                                    cmin = np.min(np.stack(col_mins, axis=0), axis=0)
+                                    cmax = np.max(np.stack(col_maxs, axis=0), axis=0)
+                                    obj_pose = self.live_object_pose(obj_uid)
+                                    for fname in obj_spec.named_frames:
+                                        if "handle" not in fname.lower():
+                                            continue
+                                        hp = np.asarray(
+                                            pose_from_named_frame(
+                                                obj_spec, fname, object_world_pose=obj_pose
+                                            ).xyz,
+                                            dtype=float,
+                                        )
+                                        outside = np.maximum(0.0, np.maximum(cmin - hp, hp - cmax))
+                                        gap_m = float(np.max(outside))
+                                        if gap_m > 0.003:
+                                            return apply_remediation_policy(
+                                                SolvabilityDiagnostics(
+                                                    failure_code="UPSTREAM_MISSING_HANDLE_COLLIDER",
+                                                    stage_index=blk_idx,
+                                                    detail=(
+                                                        f"Stage {blk_idx} prismatic joint '{obj_uid}.{jname}' remained at "
+                                                        f"{cur_val:.4f} m (target [{lo:.4f}, {hi:.4f}] m) and named "
+                                                        f"frame '{fname}' lies {gap_m * 1000.0:.1f} mm outside "
+                                                        f"'{b1_prim.GetName()}' collision AABB."
+                                                    ),
+                                                    upstream_remediation_hint=(
+                                                        f"In upstream asset USD ({obj_uid}), add positive-scale "
+                                                        f"UsdPhysics.CollisionAPI box colliders covering '{fname}' on "
+                                                        f"link '{b1_prim.GetName()}'."
+                                                    ),
+                                                ),
+                                                policy,
+                                            )
+                        continue
+                    if not jprim.IsA(UsdPhysics.RevoluteJoint):
                         continue
                     damp_attr = jprim.GetAttribute("drive:angular:physics:damping")
                     damping_val = (
@@ -1013,19 +1138,23 @@ class IsaacGenManipSimBackend:
                         si_equiv = damping_val * (180.0 / math.pi)
                         cur_val = self.live_joint_value(obj_uid, jname)
                         lo, hi = active_indices[dof.dof_index]
-                        return (
-                            "UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT",
-                            (
-                                f"Stage {blk} joint '{obj_uid}.{jname}' ({jprim.GetName()}) has "
-                                f"drive:angular:physics:damping={damping_val:.2f} N*m*s/deg "
-                                f"(~{si_equiv:.1f} N*m*s/rad in PhysX); observed {cur_val:.4f} rad "
-                                f"vs target band [{lo:.4f}, {hi:.4f}] rad."
+                        return apply_remediation_policy(
+                            SolvabilityDiagnostics(
+                                failure_code="UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT",
+                                stage_index=blk_idx,
+                                detail=(
+                                    f"Stage {blk_idx} joint '{obj_uid}.{jname}' ({jprim.GetName()}) has "
+                                    f"drive:angular:physics:damping={damping_val:.2f} N*m*s/deg "
+                                    f"(~{si_equiv:.1f} N*m*s/rad in PhysX); observed {cur_val:.4f} rad "
+                                    f"vs target band [{lo:.4f}, {hi:.4f}] rad."
+                                ),
+                                upstream_remediation_hint=(
+                                    f"In upstream asset USD ({obj_uid}), author UsdPhysics.DriveAPI "
+                                    "angular damping in per-degree units (divide SI N*m*s/rad by "
+                                    "180/pi = 57.2958, e.g. 0.15-0.45 N*m*s/deg)."
+                                ),
                             ),
-                            (
-                                f"In upstream asset USD ({obj_uid}), author UsdPhysics.DriveAPI "
-                                "angular damping in per-degree units (divide SI N*m*s/rad by "
-                                "180/pi = 57.2958, e.g. 0.15-0.45 N*m*s/deg matching IngunMA2111Fixture)."
-                            ),
+                            policy,
                         )
             elif ctype == "manip/default/sr_based_genmanip_range":
                 if obj_uid in self.brief.objects and obj_uid not in self.scene.articulation_list:
@@ -1036,22 +1165,32 @@ class IsaacGenManipSimBackend:
                     dx = float(aabb.max_xyz[0] - aabb.min_xyz[0])
                     dy = float(aabb.max_xyz[1] - aabb.min_xyz[1])
                     dz = float(aabb.max_xyz[2] - aabb.min_xyz[2])
-                    if dx > 0.088 and dy > 0.088:
-                        return (
-                            "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
-                            (
-                                f"Stage {blk} object '{obj_uid}' horizontal footprint "
-                                f"({dx:.3f} m x {dy:.3f} m, z={dz:.3f} m) exceeds lift2 max "
-                                "parallel-jaw gripper aperture 0.088 m."
+                    if dx > 0.088 and dy > 0.088 and not self._object_has_grasp_handle_or_overhang(
+                        obj_uid, dz, aabb
+                    ):
+                        return apply_remediation_policy(
+                            SolvabilityDiagnostics(
+                                failure_code="UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
+                                stage_index=blk_idx,
+                                detail=(
+                                    f"Stage {blk_idx} object '{obj_uid}' horizontal footprint "
+                                    f"({dx:.3f} m x {dy:.3f} m, z={dz:.3f} m) exceeds lift2 max "
+                                    "parallel-jaw gripper aperture 0.088 m."
+                                ),
+                                upstream_remediation_hint=(
+                                    f"Present '{obj_uid}' upright in a holder/tray, add a grasp "
+                                    "standoff lip <=0.080 m wide, or keep shortest graspable span <=0.080 m."
+                                ),
                             ),
-                            (
-                                f"Present '{obj_uid}' upright in a holder/tray, add a grasp "
-                                "standoff lip <=0.080 m wide, or keep shortest horizontal span "
-                                "<=0.080 m (matching pcba_carrier_board)."
-                            ),
+                            policy,
+                            object_dims_xyz_m=(dx, dy, dz),
                         )
 
-        return ("STAGE_INCOMPLETE", default_detail, "")
+        return SolvabilityDiagnostics(
+            failure_code="STAGE_INCOMPLETE",
+            stage_index=blk_idx,
+            detail=default_detail,
+        )
 
     def finalize_outputs(self) -> tuple[list[MediaArtifactRef], str | None, dict[str, Any]]:
         """Save keyframes, MP4 progression video, optional .npz trajectory, and summary."""
@@ -1167,7 +1306,13 @@ class IsaacGenManipSimBackend:
             artifact_relpath = str(npz_path)
 
         stage_scores = self.live_stage_scores()
-        blocking_stage = next((i for i, s in enumerate(stage_scores) if s < 0.9999), None)
+        mm = self.scene.metric_manager
+        stages_completed, blocking_stage = compute_sequential_blocking_stage(
+            num_stages=len(self.brief.stages),
+            cur_union_metric_is_none=(mm.cur_union_metric is None),
+            long_stride_idx=int(mm.long_stride_idx),
+            final_score=final_score,
+        )
         end_objects = {}
         for oid in self.brief.objects:
             if oid == "00000000000000000000000000000000":
@@ -1194,6 +1339,7 @@ class IsaacGenManipSimBackend:
         summary = {
             "backend": "isaac_genmanip_41",
             "stage_scores": list(stage_scores),
+            "stages_completed_sequentially": stages_completed,
             "end_of_episode_all_stages_hold": all(s >= 0.9999 for s in stage_scores) if stage_scores else False,
             "blocking_stage": blocking_stage,
             "objects_final": end_objects,

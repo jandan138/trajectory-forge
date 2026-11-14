@@ -59,12 +59,14 @@ def _parse_pose(
     xyz_raw = (
         raw_map.get("xyz")
         or raw_map.get("translation_parent_local_m")
+        or raw_map.get("translation_body_local_usd")
         or layout_map.get("position")
         or (0.0, 0.0, 0.0)
     )
     wxyz_raw = (
         raw_map.get("wxyz")
         or raw_map.get("rotation_parent_local_wxyz")
+        or raw_map.get("rotation_body_local_wxyz")
         or layout_map.get("orientation")
         or (1.0, 0.0, 0.0, 0.0)
     )
@@ -77,6 +79,7 @@ def _parse_pose(
 def _parse_object_contract(
     raw: Mapping[str, Any],
     initial_layout: Mapping[str, Any] | None = None,
+    fallback_named_frames: Mapping[str, Any] | None = None,
 ) -> ObjectContractSpec:
     object_id = str(raw.get("scenario_object_id") or raw.get("runtime_uid") or "")
     if not object_id:
@@ -112,6 +115,15 @@ def _parse_object_contract(
                 parent_prim=str(frame_data.get("parent_prim", "")),
                 authoritative=bool(frame_data.get("authoritative", True)),
             )
+    if isinstance(fallback_named_frames, Mapping):
+        for frame_name, frame_data in dict(fallback_named_frames).items():
+            if str(frame_name) not in named_frames and isinstance(frame_data, Mapping):
+                named_frames[str(frame_name)] = NamedFrameSpec(
+                    name=str(frame_name),
+                    pose_local=_parse_pose(frame_data),
+                    parent_prim=str(frame_data.get("parent_prim", "")),
+                    authoritative=bool(frame_data.get("authoritative", True)),
+                )
 
     dofs: dict[str, ArticulationDofSpec] = {}
     reset_joints: tuple[float, ...] = ()
@@ -218,11 +230,29 @@ def load_genmanip_collected_package(package_dir: Path) -> ScenarioIntakeBrief:
     if not isinstance(task_data, Mapping):
         raise ContractValidationError("episode_metadata missing task_data mapping")
 
+    interaction_frames_by_prim: dict[str, Mapping[str, Any]] = {}
+    for sa in manifest.get("source_assets", ()):
+        if not isinstance(sa, Mapping):
+            continue
+        up_meta = sa.get("upstream_package", {})
+        meta = up_meta.get("metadata", {}) if isinstance(up_meta, Mapping) else {}
+        ic = meta.get("interaction_contract", {}) if isinstance(meta, Mapping) else {}
+        if isinstance(ic, Mapping):
+            prim = str(ic.get("asset_entry_prim", ""))
+            nf = ic.get("named_frames")
+            if prim and isinstance(nf, Mapping):
+                interaction_frames_by_prim[prim] = nf
+
     initial_layout = task_data.get("initial_layout", {})
     robot_spawn = _parse_robot_spawn(initial_layout)
     objects: dict[str, ObjectContractSpec] = {}
     for obj_raw in runtime_contract.get("objects", ()):
-        obj_spec = _parse_object_contract(obj_raw, initial_layout=initial_layout)
+        source_prim = str(obj_raw.get("source_prim_path", "")) if isinstance(obj_raw, Mapping) else ""
+        obj_spec = _parse_object_contract(
+            obj_raw,
+            initial_layout=initial_layout,
+            fallback_named_frames=interaction_frames_by_prim.get(source_prim),
+        )
         objects[obj_spec.object_id] = obj_spec
 
     art_uids = {

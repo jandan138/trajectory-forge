@@ -277,11 +277,17 @@ def run_job(
 
         media_refs, artifact_relpath, state_summary = backend.finalize_outputs()
         final_score = float(backend.live_current_score())
-        remediation_hint = ""
+        diagnostics = SolvabilityDiagnostics(
+            failure_code=failure_code,
+            stage_index=(
+                state_summary.get("blocking_stage") if status != "succeeded" else None
+            ),
+            detail=failure_detail,
+        )
         if status == "succeeded" and final_score < 0.9999:
             status = "failed"
-            failure_code, failure_detail, remediation_hint = backend.diagnose_blocking_stage(
-                state_summary
+            diagnostics = backend.diagnose_blocking_stage(
+                state_summary, remediation_policy=req.remediation_policy
             )
 
         firewall_verified = (
@@ -319,12 +325,7 @@ def run_job(
             snapshots_used=backend.snapshots_used,
             firewall_verified=firewall_verified,
             stage_progression=tuple(backend.stage_progression),
-            diagnostics=SolvabilityDiagnostics(
-                failure_code=failure_code,
-                stage_index=state_summary.get("blocking_stage") if status != "succeeded" else None,
-                detail=failure_detail,
-                upstream_remediation_hint=remediation_hint,
-            ),
+            diagnostics=diagnostics,
             media=tuple(media_refs),
             trajectory_manifest=traj_manifest,
             saved_snapshots=tuple(backend.saved_snapshots),

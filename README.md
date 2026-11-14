@@ -69,18 +69,27 @@ make check      # additionally runs @pytest.mark.local_artifacts tests against r
 make type       # mypy strict-ish type check across src/
 ```
 
-## Live Isaac Sim 4.1 Verification (`r3` Out-of-Domain Suite)
+## Live Isaac Sim 4.1 Verification (`r3`, `r4` & Dual-Mode Remediation)
 
-Verified end-to-end over `--backend ssh-isaac-genmanip` against `scenario-forge`'s `r3` packages (`manip/lift2/R5a` + CUDA CuRobo):
+Verified end-to-end across `--backend isaac-genmanip` and `--backend ssh-isaac-genmanip` (`manip/lift2/R5a` + CUDA CuRobo) using `RemediationPolicySpec` (`--remediation-mode physics_tuning | scene_codesign`, `--allow-pose-adjustment`) and [r4_out_of_domain_suite.yaml](configs/benchmarks/r4_out_of_domain_suite.yaml):
 
 - **Closed-loop solve (`solve` -> `privileged_search` -> `full_horizon_gate` -> `trajectory_synthesis`)**:
-  - Run with `PYTHONPATH=src python -m trajectory_forge.cli solve --package <pkg> --embodiment configs/embodiments/lift2_r5a_bimanual.yaml --controller <ctrl.py> --backend ssh-isaac-genmanip --max-steps 2500 --max-attempts 1`.
-  - **`electronics_qa_ingun_probe_lock`**: **Full `0.00 -> 1.00` pass** (`5/5` stages held at episode end in `1757` continuous steps from `t=0`, `snapshots_used=0`, `firewall_verified=True`), exporting clean `.npz` (`privileged_channels_recorded=False`) + `1280x720` H.264 MP4 & keyframe PNGs.
-- **Partial stage verification & automated `SolvabilityDiagnostics`**:
-  - **`specialty_coffee_bar_creatista_prep`**: Stages `0–2` verified (`final_score=0.50`, `steps_executed=1119`); Stage `3` automatically emits `UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT` (`creatista_machine.brew_lever` / `BrewLeverJoint` `damping=12.00 N*m*s/deg`).
-  - **`modern_office_brother_calibrate`**: Stages `1` & `4` (`paper_cassette=-0.0031 m`, `button_start=-0.00226 m`) verified in `967` steps; Stage `0` automatically emits `UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE` (`a5_media_pack` `0.122 m x 0.160 m` exceeds `0.088 m` max parallel-jaw aperture).
+  - Run with `PYTHONPATH=src python -m trajectory_forge.cli solve --package <pkg> --embodiment configs/embodiments/lift2_r5a_bimanual.yaml --controller <ctrl.py> --backend isaac-genmanip --remediation-mode physics_tuning [--allow-pose-adjustment] --max-steps 2600 --max-attempts 1`.
+  - **`electronics_qa_ingun_probe_lock` (`r3`)**: **Full `0.00 -> 1.00` pass** (`5/5` stages held at episode end in `1757` continuous steps from `t=0`, `snapshots_used=0`, `firewall_verified=True`), exporting clean `.npz` (`privileged_channels_recorded=False`) + `1280x720` H.264 MP4 & keyframe PNGs.
+  - **`real2sim_office_desk_riser_organize` (`GEN-010` Real-to-Sim Workstation)**: **Full `0.00 -> 1.00` pass** (`5/5` sequential stages completed in `1448` continuous steps from `t=0` — pull right drawer open, store ChocoPie pack & ballpoint pen, push drawer closed to `1.75 mm`, place water mug upright beside Sprite bottle — `snapshots_used=0`, `firewall_verified=True`), exporting clean `.npz` + `1280x720` H.264 MP4 & keyframe PNGs.
+  - **`specialty_coffee_bar_creatista_prep` (`r4`, Mode 2 strict `physics_tuning`)**: **Full `0.00 -> 1.00` pass** (`6/6` stages held at episode end in `1775` continuous steps from `t=0`, zero pose/visual edits, `snapshots_used=0`, `firewall_verified=True`), exporting clean `.npz` + `1280x720` H.264 MP4.
+  - **`modern_office_brother_calibrate` (`r4`, Dual-Mode Ablations & Co-Design)**:
+    - Strict Mode 2 (`mode2_strict_ablation`, `--remediation-mode physics_tuning`): Stage `1` verified physically; Attempt 1 halts cleanly with `BLOCKED_BY_REMEDIATION_POLICY` (`root_failure_code=UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE`, `policy_blocked=True`).
+    - Pose-adjusted Mode 2 (`mode2_pose_ablation`, `--remediation-mode physics_tuning --allow-pose-adjustment`): **Full `0.00 -> 1.00` pass** (`5/5` stages in `1449` steps, `snapshots_used=0`, `firewall_verified=True`) using zero added parts (`30–32 mm` tabletop front overhang).
+    - Co-design Mode 1 (`scene_gate`, `--remediation-mode scene_codesign`): **Full `0.00 -> 1.00` pass** (`5/5` stages in `1566` steps, `snapshots_used=0`, `firewall_verified=True`) using upstream carry handles via `named_frame("grasp")`.
+- **Prior `r3` Partial Verification & Automated `SolvabilityDiagnostics`**:
+  - **`specialty_coffee_bar_creatista_prep` (`r3`)**: Stages `0–2` verified (`final_score=0.50`, `steps_executed=1119`); Stage `3` emits `UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT` (`creatista_machine.brew_lever` / `BrewLeverJoint` `damping=12.00 N*m*s/deg`).
+  - **`modern_office_brother_calibrate` (`r3`)**: Stages `1` & `4` verified in `967` steps; Stage `0` emits `UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE`.
 
 See also:
+- [Offline Self-Contained Progress Showcase Builder](scripts/build_progress_showcase_html.py) (`python scripts/build_progress_showcase_html.py` builds a single-file offline HTML with inline MP4s & keyframes under `external_artifacts/reports/`)
 - [v0.1 Architecture & Privileged Mode Contract](docs/design/architecture-v0.1.md)
 - [Google AI Ultra Cloud Brain to RTX 4090 Sim Worker Workflow](docs/operations/ultra-cloud-to-4090-worker-workflow.md)
 - [2026-11-13 `r3` Privileged Mode Live Verification Record](docs/records/2026-11-13-r3-privileged-mode-live-verification.md)
+- [2026-11-14 `GEN-010` Real-to-Sim Workstation Live Verification Record](docs/records/2026-11-14-real2sim-workstation-live-verification.md)
+- [2026-11-14 `r4` Out-of-Domain Suite & Dual-Mode Remediation Live Verification Record](docs/records/2026-11-14-out-of-domain-r4-full-suite-verification.md)

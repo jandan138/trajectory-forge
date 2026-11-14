@@ -83,8 +83,11 @@ class SSHIsaacGenManipExecutor:
             )
         )
         adapter_dir = self.config.remote_repo_root / "src/trajectory_forge/adapters/isaac_genmanip"
+        core_dir = self.config.remote_repo_root / "src/trajectory_forge/core"
+        solver_dir = self.config.remote_repo_root / "src/trajectory_forge/solver"
+        intake_dir = self.config.remote_repo_root / "src/trajectory_forge/intake"
         return (
-            f"ls -la {shlex.quote(str(adapter_dir))} >/dev/null 2>&1 || true; "
+            f"ls -la {shlex.quote(str(adapter_dir))} {shlex.quote(str(core_dir))} {shlex.quote(str(solver_dir))} {shlex.quote(str(intake_dir))} >/dev/null 2>&1 || true; "
             f"mkdir -p {shlex.quote(scratch)} {shared_cache}/isaac {shared_cache}/xdg; "
             f"trap 'rm -rf {shlex.quote(scratch)}' EXIT; "
             f"PYTHONDONTWRITEBYTECODE=1 "

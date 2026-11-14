@@ -1,5 +1,6 @@
 from trajectory_forge.solver.diagnostics import (
     AttemptFeedbackPacket,
+    apply_remediation_policy,
     build_feedback_packet,
     render_repair_prompt_markdown,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "SolveSessionConfig",
     "SolveSessionReport",
     "StaticControllerSynthesizer",
+    "apply_remediation_policy",
     "build_feedback_packet",
     "render_repair_prompt_markdown",
 ]

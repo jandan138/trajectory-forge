@@ -58,3 +58,26 @@ Tracked in `configs/benchmarks/r3_out_of_domain_suite.yaml` (detailed live run m
 | `electronics_qa_ingun_probe_lock` | `electronics_qa_station` | `ingun_fixture` (`pressure_hood`, `clamp_lever`, `mode_toggle`, `test_start_button`) | 5 | **Solved `1.00` (`5/5` hold)**, `1757` steps, `snapshots_used=0`, `firewall_verified=True` |
 | `specialty_coffee_bar_creatista_prep` | `specialty_coffee_bar` | `creatista_machine` (`drip_tray`, `brew_lever`, `select_dial`, `dial_press`) | 6 | Stages `0–2` pass (`0.50`); Stage `3` blocked (`UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT`) |
 | `modern_office_brother_calibrate` | `modern_office_print_hub` | `brother_printer` (`paper_cassette`, `scanner_lid`, `button_start`) | 5 | Stages `1` & `4` pass physically; Stage `0` blocked (`UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE`) |
+
+---
+
+## 5. Dual-Mode Upstream Scene Remediation Contract & `r4` Live Verification
+
+When downstream simulation discovers that an upstream `scenario-forge` package is physically blocked, `trajectory-forge` governs allowable upstream scene changes via `RemediationPolicySpec` (`src/trajectory_forge/core/contracts.py`):
+
+| Policy Mode | `allow_pose_adjustment` | Permitted Upstream Remediations | Behavior on Structural Blockers (`UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE`) |
+|---|---|---|---|
+| `physics_tuning` (default) | `False` (strict) | Joint drive damping/stiffness/effort (`joint_drive`), missing collision proxies (`collision_proxy`), contact friction/offset (`friction_or_offset`). Zero visual/mesh edits, zero added parts, zero initial pose changes. | If the object has no pinchable edge `<= 0.080 m` without moving or adding parts, `apply_remediation_policy()` emits `BLOCKED_BY_REMEDIATION_POLICY` (`policy_blocked=True`, preserving `root_failure_code`) and `PrivilegedSolverHarness` halts cleanly after Attempt 1 (`stop_on_policy_block=True`). |
+| `physics_tuning` | `True` (sub-switch) | All Mode 2 physics adjustments **plus** non-destructive initial pose/overhang adjustments (`pose_adjustment`, e.g., tabletop front-edge overhang when `min(dims_xyz) <= 0.080 m`) with zero visual mesh edits or added parts. | Allowed when `min(dims_xyz) <= 0.080 m` (annotated `remediation_category="pose_adjustment"`, `required_remediation_mode="physics_tuning"`); blocked only if all three dimensions exceed the gripper span. |
+| `scene_codesign` | `True` / `False` | All Mode 2 adjustments **plus** structural co-design (`affordance_part`, `fixture_or_layout`), such as adding a tabletop grasp handle / carry-bar with `named_frame("grasp")` and positive-scale `purpose="guide"` proxy collider. | Allowed (`remediation_category="affordance_part"`, `required_remediation_mode="scene_codesign"`), consumed directly by controllers via `ctx.world.named_frame(obj_id, "grasp")`. |
+
+Verified across `r4` packages (`configs/benchmarks/r4_out_of_domain_suite.yaml`) and `GEN-010` in Isaac Sim `4.1` (full metrics in [2026-11-14-out-of-domain-r4-full-suite-verification.md](../records/2026-11-14-out-of-domain-r4-full-suite-verification.md)):
+
+| Task ID | Remediation Policy Tested | Stages Passed | Final Score | Steps | Snapshots Used | Firewall Verified | Outcome / Failure Code |
+|---|---|---|---|---|---|---|---|
+| `electronics_qa_ingun_probe_lock` (`r3`/`r4`) | `physics_tuning` (strict) | `5/5` (`hold=True`) | `1.0` | `1757` | `0` | `True` | `succeeded=True` (`r3` baseline) |
+| `real2sim_office_desk_riser_organize` (`GEN-010`) | `physics_tuning` (`collision_proxy`) | `5/5` | `1.0` | `1448` | `0` | `True` | `succeeded=True` ([record](../records/2026-11-14-real2sim-workstation-live-verification.md)) |
+| `specialty_coffee_bar_creatista_prep` (`r4`) | `physics_tuning` (strict) | `6/6` (`hold=True`) | `1.0` | `1775` | `0` | `True` | `succeeded=True` |
+| `modern_office_brother_calibrate` (`r4` `mode2_strict_ablation`) | `physics_tuning` (`allow_pose_adjustment=False`) | Stage `1` only | `0.0` | `1280` | `4` (search) | `False` | `BLOCKED_BY_REMEDIATION_POLICY` (`policy_blocked=True`) |
+| `modern_office_brother_calibrate` (`r4` `mode2_pose_ablation`) | `physics_tuning` (`allow_pose_adjustment=True`) | `5/5` | `1.0` | `1449` | `0` | `True` | `succeeded=True` |
+| `modern_office_brother_calibrate` (`r4` `scene_gate`) | `scene_codesign` | `5/5` | `1.0` | `1566` | `0` | `True` | `succeeded=True` |

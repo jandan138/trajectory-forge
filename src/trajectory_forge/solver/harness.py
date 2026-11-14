@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 from trajectory_forge.core.contracts import (
@@ -8,6 +8,7 @@ from trajectory_forge.core.contracts import (
     ControllerSafetyError,
     EmbodimentCard,
     FirewallViolationError,
+    RemediationPolicySpec,
     RolloutJobRequest,
     RolloutJobResult,
     ScenarioIntakeBrief,
@@ -35,6 +36,10 @@ class SolveSessionConfig:
     render_gate_media: bool = False
     render_synthesis_media: bool = True
     success_threshold: float = 0.9999
+    remediation_policy: RemediationPolicySpec = field(
+        default_factory=RemediationPolicySpec
+    )
+    stop_on_policy_block: bool = True
 
     def __post_init__(self) -> None:
         if self.max_attempts <= 0:
@@ -55,6 +60,10 @@ class SolveSessionReport:
     history: tuple[AttemptFeedbackPacket, ...]
     gate_result: RolloutJobResult | None = None
     synthesis_result: RolloutJobResult | None = None
+    remediation_policy: RemediationPolicySpec = field(
+        default_factory=RemediationPolicySpec
+    )
+    session_config: SolveSessionConfig | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,8 +77,14 @@ class SolveSessionReport:
             "synthesis_result": (
                 self.synthesis_result.to_dict() if self.synthesis_result is not None else None
             ),
+            "remediation_policy": self.remediation_policy.to_dict(),
             "config_summary": asdict(
-                SolveSessionConfig(max_attempts=max(1, self.attempts_used))
+                self.session_config
+                if self.session_config is not None
+                else SolveSessionConfig(
+                    max_attempts=max(1, self.attempts_used),
+                    remediation_policy=self.remediation_policy,
+                )
             ),
         }
 
@@ -139,8 +154,10 @@ class PrivilegedSolverHarness:
         code = synthesizer.propose_initial(brief, embodiment)
         gate_result: RolloutJobResult | None = None
         synthesis_result: RolloutJobResult | None = None
+        attempts_used = 0
 
         for attempt in range(1, cfg.max_attempts + 1):
+            attempts_used = attempt
             search_job_id = f"{brief.package_id}_a{attempt}_search"
             search_req = RolloutJobRequest(
                 job_id=search_job_id,
@@ -151,6 +168,7 @@ class PrivilegedSolverHarness:
                 controller_code=code,
                 max_steps=cfg.max_steps,
                 render_media=False,
+                remediation_policy=cfg.remediation_policy,
             )
             preflight_err = self._run_preflight_if_enabled(
                 code=code,
@@ -173,6 +191,8 @@ class PrivilegedSolverHarness:
             if search_res.final_score < cfg.success_threshold:
                 pkt = build_feedback_packet(attempt=attempt, request=search_req, result=search_res)
                 history.append(pkt)
+                if cfg.stop_on_policy_block and search_res.diagnostics.policy_blocked:
+                    break
                 if attempt < cfg.max_attempts:
                     code = synthesizer.repair(brief, embodiment, code, pkt)
                 continue
@@ -188,6 +208,7 @@ class PrivilegedSolverHarness:
                 controller_code=code,
                 max_steps=cfg.max_steps,
                 render_media=cfg.render_gate_media,
+                remediation_policy=cfg.remediation_policy,
             )
             gate_preflight_err = self._run_preflight_if_enabled(
                 code=code,
@@ -231,6 +252,7 @@ class PrivilegedSolverHarness:
                     controller_code=code,
                     max_steps=cfg.max_steps,
                     render_media=cfg.render_synthesis_media,
+                    remediation_policy=cfg.remediation_policy,
                 )
                 synth_res = self.executor(synth_req)
                 synthesis_result = synth_res
@@ -258,16 +280,20 @@ class PrivilegedSolverHarness:
                 history=tuple(history),
                 gate_result=gate_result,
                 synthesis_result=synthesis_result,
+                remediation_policy=cfg.remediation_policy,
+                session_config=cfg,
             )
 
         return SolveSessionReport(
             package_id=brief.package_id,
             embodiment_id=embodiment.embodiment_id,
             succeeded=False,
-            attempts_used=cfg.max_attempts,
+            attempts_used=attempts_used,
             final_code=code,
             history=tuple(history),
             gate_result=gate_result,
             synthesis_result=synthesis_result,
+            remediation_policy=cfg.remediation_policy,
+            session_config=cfg,
         )
 

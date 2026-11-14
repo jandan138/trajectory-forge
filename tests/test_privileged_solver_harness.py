@@ -5,10 +5,14 @@ from pathlib import Path
 import pytest
 
 from trajectory_forge.core.contracts import (
+    ALLOWED_REMEDIATION_MODES,
     ArticulationDofSpec,
+    ContractValidationError,
     FirewallViolationError,
+    NamedFrameSpec,
     ObjectContractSpec,
     PoseSpec,
+    RemediationPolicySpec,
     RobotSpawnSpec,
     RolloutJobRequest,
     RolloutJobResult,
@@ -24,7 +28,9 @@ from trajectory_forge.intake.genmanip_intake import load_genmanip_collected_pack
 from trajectory_forge.sdk.context import run_controller_preflight
 from trajectory_forge.solver.diagnostics import (
     AttemptFeedbackPacket,
+    apply_remediation_policy,
     build_feedback_packet,
+    compute_sequential_blocking_stage,
     render_repair_prompt_markdown,
 )
 from trajectory_forge.solver.harness import PrivilegedSolverHarness, SolveSessionConfig
@@ -36,9 +42,14 @@ from trajectory_forge.solver.synthesizer import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 R3_CONTROLLERS_DIR = REPO_ROOT / "examples" / "controllers" / "r3"
+REAL2SIM_CONTROLLERS_DIR = REPO_ROOT / "examples" / "controllers" / "real2sim"
 R3_PACKAGES = Path(
     "/cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/"
     "out_of_domain_factory_r3_20261113/packages"
+)
+REAL2SIM_PACKAGES = Path(
+    "/cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/"
+    "real2sim_office_desk_20261113/scene_gate/packages"
 )
 
 
@@ -141,14 +152,24 @@ def _synthetic_r3_brief(package_id: str) -> ScenarioIntakeBrief:
                     runtime_uid="a5_media_pack",
                     role="manipulable",
                     state_prim_path="/World/a5_media_pack",
-                    initial_pose=PoseSpec(xyz=(-0.415, -0.12, 0.755)),
+                    initial_pose=PoseSpec(xyz=(-0.415, -0.152, 0.757)),
+                    named_frames={
+                        "grasp": NamedFrameSpec(
+                            name="grasp", pose_local=PoseSpec(xyz=(0.0, 0.0, 0.030))
+                        )
+                    },
                 ),
                 "calibration_sheet": ObjectContractSpec(
                     object_id="calibration_sheet",
                     runtime_uid="calibration_sheet",
                     role="manipulable",
                     state_prim_path="/World/calibration_sheet",
-                    initial_pose=PoseSpec(xyz=(0.415, -0.10, 0.755)),
+                    initial_pose=PoseSpec(xyz=(0.415, -0.142, 0.757)),
+                    named_frames={
+                        "grasp": NamedFrameSpec(
+                            name="grasp", pose_local=PoseSpec(xyz=(0.0, -0.054, 0.0125))
+                        )
+                    },
                 ),
                 "brother_printer": ObjectContractSpec(
                     object_id="brother_printer",
@@ -164,6 +185,70 @@ def _synthetic_r3_brief(package_id: str) -> ScenarioIntakeBrief:
                         )
                     ),
                     reset_joint_positions=(-0.165, -1.0821, 0.0),
+                ),
+            },
+        ),
+        "real2sim_office_desk_riser_organize": (
+            (
+                "stage0_right_drawer_opened",
+                "stage1_chocopie_in_right_drawer",
+                "stage2_pen_in_right_drawer",
+                "stage3_right_drawer_closed",
+                "stage4_mug_organized_next_to_sprite",
+            ),
+            {
+                "chocopie_pack": ObjectContractSpec(
+                    object_id="chocopie_pack",
+                    runtime_uid="chocopie_pack",
+                    role="manipulable",
+                    state_prim_path="/World/chocopie_pack",
+                    initial_pose=PoseSpec(xyz=(0.355, -0.015, 0.752)),
+                ),
+                "blue_ballpoint_pen": ObjectContractSpec(
+                    object_id="blue_ballpoint_pen",
+                    runtime_uid="blue_ballpoint_pen",
+                    role="manipulable",
+                    state_prim_path="/World/blue_ballpoint_pen",
+                    initial_pose=PoseSpec(xyz=(0.305, -0.100, 0.752)),
+                ),
+                "glass_water_mug": ObjectContractSpec(
+                    object_id="glass_water_mug",
+                    runtime_uid="glass_water_mug",
+                    role="manipulable",
+                    state_prim_path="/World/glass_water_mug",
+                    initial_pose=PoseSpec(xyz=(0.438, -0.195, 0.752)),
+                ),
+                "sprite_bottle_500ml": ObjectContractSpec(
+                    object_id="sprite_bottle_500ml",
+                    runtime_uid="sprite_bottle_500ml",
+                    role="context",
+                    state_prim_path="/World/sprite_bottle_500ml",
+                    initial_pose=PoseSpec(xyz=(0.578, -0.111, 0.752)),
+                ),
+                "desktop_riser_rig": ObjectContractSpec(
+                    object_id="desktop_riser_rig",
+                    runtime_uid="desktop_riser_rig",
+                    role="hero_articulated",
+                    state_prim_path="/World/desktop_riser_rig",
+                    initial_pose=PoseSpec(xyz=(-0.045, 0.125, 0.750)),
+                    named_frames={
+                        "handle_right": NamedFrameSpec(
+                            name="handle_right",
+                            pose_local=PoseSpec(xyz=(0.121, -0.122, 0.030)),
+                        ),
+                        "drawer_right_cavity": NamedFrameSpec(
+                            name="drawer_right_cavity",
+                            pose_local=PoseSpec(xyz=(0.121, -0.158, 0.0175)),
+                        ),
+                    },
+                    dofs=_make_dofs(
+                        (
+                            ("drawer_left", "/World/desktop_riser_rig/drawer_left"),
+                            ("drawer_right", "/World/desktop_riser_rig/drawer_right"),
+                            ("laptop_lid_hinge", "/World/desktop_riser_rig/laptop_lid_hinge"),
+                        )
+                    ),
+                    reset_joint_positions=(0.0, 0.0, 1.7802358),
                 ),
             },
         ),
@@ -509,6 +594,13 @@ def test_upstream_solvability_diagnostics_propagate_to_solve_report() -> None:
             "a5_media_pack 0.148m x 0.210m exceeds 0.088m R5a jaw aperture",
             "Add recessed grip cutout or reduce thickness <= 0.085m.",
         ),
+        (
+            "real2sim_office_desk_riser_organize",
+            0,
+            "UPSTREAM_MISSING_HANDLE_COLLIDER",
+            "desktop_riser_rig.handle_right lies 5.0mm outside DrawerRight collision AABB",
+            "Add positive-scale PhysicsCollisionAPI box colliders for the drawer pull handle.",
+        ),
     )
     for package_id, blocking_stage, failure_code, detail, hint in cases:
         brief = _synthetic_r3_brief(package_id)
@@ -569,3 +661,281 @@ def test_upstream_solvability_diagnostics_propagate_to_solve_report() -> None:
         md = render_repair_prompt_markdown(brief, embodiment, pkt)
         assert failure_code in md
         assert hint in md
+
+
+def test_compute_sequential_blocking_stage_handles_non_monotonic_cyclic_stages() -> None:
+    # Stage 0 opened drawer_right, Stage 3 closed drawer_right -> stage_scores[0] flips back to 0.0
+    completed, blk = compute_sequential_blocking_stage(
+        num_stages=5,
+        cur_union_metric_is_none=True,
+        long_stride_idx=5,
+        final_score=1.0,
+    )
+    assert completed == 5
+    assert blk is None
+
+    completed_mid, blk_mid = compute_sequential_blocking_stage(
+        num_stages=5,
+        cur_union_metric_is_none=False,
+        long_stride_idx=3,
+        final_score=0.6,
+    )
+    assert completed_mid == 3
+    assert blk_mid == 3
+
+    req = RolloutJobRequest(
+        job_id="cyclic_ok",
+        scenario_package_ref="real2sim_office_desk_riser_organize",
+        embodiment_id="lift2_r5a_bimanual",
+        mode="full_horizon_gate",
+        seed=0,
+        controller_code="def solve(ctx):\n    ctx.step(1)\n",
+    )
+    res = RolloutJobResult(
+        job_id="cyclic_ok",
+        status="succeeded",
+        mode="full_horizon_gate",
+        final_score=1.0,
+        steps_executed=1800,
+        snapshots_used=0,
+        firewall_verified=True,
+        state_summary={
+            "stage_scores": [0.0, 1.0, 1.0, 1.0, 1.0],
+            "stages_completed_sequentially": 5,
+            "blocking_stage": None,
+        },
+    )
+    pkt = build_feedback_packet(attempt=1, request=req, result=res)
+    assert pkt.blocking_stage is None
+
+
+def test_real2sim_controller_offline_preflight_search_and_firewall_gate() -> None:
+    embodiment = load_embodiment_card(
+        REPO_ROOT / "configs" / "embodiments" / "lift2_r5a_bimanual.yaml"
+    )
+    brief = _synthetic_r3_brief("real2sim_office_desk_riser_organize")
+    code = (REAL2SIM_CONTROLLERS_DIR / "office_desk_riser_organize_privileged.py").read_text(
+        encoding="utf-8"
+    )
+    search_res = run_controller_preflight(
+        code,
+        brief,
+        embodiment,
+        mode="privileged_search",
+        max_steps=2600,
+    )
+    assert search_res.status == "succeeded"
+    assert search_res.snapshots_used > 0
+    assert search_res.firewall_verified is False
+
+    gate_res = run_controller_preflight(
+        code,
+        brief,
+        embodiment,
+        mode="full_horizon_gate",
+        max_steps=2600,
+    )
+    assert gate_res.status == "succeeded"
+    assert gate_res.snapshots_used == 0
+    assert gate_res.firewall_verified is True
+
+
+@pytest.mark.local_artifacts
+def test_real2sim_controller_preflight_against_real_collected_package() -> None:
+    pkg_dir = REAL2SIM_PACKAGES / "real2sim_office_desk_riser_organize" / "collected_package"
+    if not pkg_dir.exists():
+        pytest.skip(f"real2sim collected package not present at {pkg_dir}")
+    embodiment = load_embodiment_card(
+        REPO_ROOT / "configs" / "embodiments" / "lift2_r5a_bimanual.yaml"
+    )
+    brief = load_genmanip_collected_package(pkg_dir)
+    code = (REAL2SIM_CONTROLLERS_DIR / "office_desk_riser_organize_privileged.py").read_text(
+        encoding="utf-8"
+    )
+    gate_res = run_controller_preflight(
+        code,
+        brief,
+        embodiment,
+        mode="full_horizon_gate",
+        max_steps=2600,
+    )
+    assert gate_res.status == "succeeded"
+    assert gate_res.snapshots_used == 0
+    assert gate_res.firewall_verified is True
+
+
+def test_remediation_policy_spec_validation_and_roundtrip() -> None:
+    assert ALLOWED_REMEDIATION_MODES == frozenset({"physics_tuning", "scene_codesign"})
+    strict_policy = RemediationPolicySpec()
+    assert strict_policy.mode == "physics_tuning"
+    assert strict_policy.allow_pose_adjustment is False
+    assert strict_policy.allows_pose_adjustment is False
+    assert strict_policy.allows_structural_parts is False
+
+    pose_policy = RemediationPolicySpec(mode="physics_tuning", allow_pose_adjustment=True)
+    assert pose_policy.allows_pose_adjustment is True
+    assert pose_policy.allows_structural_parts is False
+
+    codesign_policy = RemediationPolicySpec(mode="scene_codesign", allow_pose_adjustment=False)
+    assert codesign_policy.allows_pose_adjustment is True
+    assert codesign_policy.allows_structural_parts is True
+
+    with pytest.raises(ContractValidationError):
+        RemediationPolicySpec(mode="invalid_mode")
+
+    req_legacy = RolloutJobRequest.from_dict(
+        {
+            "job_id": "legacy",
+            "scenario_package_ref": "pkg",
+            "embodiment_id": "lift2_r5a_bimanual",
+            "mode": "privileged_search",
+            "seed": 0,
+            "controller_code": "def solve(ctx):\n    ctx.step(1)\n",
+        }
+    )
+    assert req_legacy.remediation_policy == strict_policy
+
+    req_pose = RolloutJobRequest(
+        job_id="pose_mode",
+        scenario_package_ref="pkg",
+        embodiment_id="lift2_r5a_bimanual",
+        mode="privileged_search",
+        seed=0,
+        controller_code="def solve(ctx):\n    ctx.step(1)\n",
+        remediation_policy=pose_policy,
+    )
+    req_rt = RolloutJobRequest.from_dict(req_pose.to_dict())
+    assert req_rt.remediation_policy == pose_policy
+
+    diag = SolvabilityDiagnostics(
+        failure_code="BLOCKED_BY_REMEDIATION_POLICY",
+        stage_index=0,
+        detail="blocked",
+        upstream_remediation_hint="switch mode",
+        remediation_category="affordance_part",
+        required_remediation_mode="scene_codesign",
+        requires_pose_adjustment=True,
+        policy_blocked=True,
+        root_failure_code="UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
+    )
+    diag_rt = SolvabilityDiagnostics.from_dict(diag.to_dict())
+    assert diag_rt == diag
+
+
+def test_apply_remediation_policy_modes_and_pose_subswitch() -> None:
+    damp_diag = SolvabilityDiagnostics(
+        failure_code="UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT",
+        stage_index=3,
+        detail="damping too high",
+        upstream_remediation_hint="Lower angular damping to 0.22 N*m*s/deg.",
+    )
+    strict = RemediationPolicySpec(mode="physics_tuning", allow_pose_adjustment=False)
+    out_damp = apply_remediation_policy(damp_diag, strict)
+    assert out_damp.policy_blocked is False
+    assert out_damp.remediation_category == "joint_drive"
+    assert out_damp.required_remediation_mode == "physics_tuning"
+    assert out_damp.failure_code == "UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT"
+
+    proxy_diag = SolvabilityDiagnostics(
+        failure_code="UPSTREAM_MISSING_HANDLE_COLLIDER",
+        stage_index=0,
+        detail="handle collider missing",
+        upstream_remediation_hint="Add positive-scale box collider on handle.",
+    )
+    out_proxy = apply_remediation_policy(proxy_diag, strict)
+    assert out_proxy.policy_blocked is False
+    assert out_proxy.remediation_category == "collision_proxy"
+    assert out_proxy.required_remediation_mode == "physics_tuning"
+
+    aperture_diag = SolvabilityDiagnostics(
+        failure_code="UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
+        stage_index=0,
+        detail="a5_media_pack horizontal footprint (0.156 m x 0.116 m, z=0.022 m) exceeds 0.088 m",
+        upstream_remediation_hint="Add grasp handle <=0.080 m or stand upright.",
+    )
+    blocked = apply_remediation_policy(
+        aperture_diag, strict, object_dims_xyz_m=(0.156, 0.116, 0.022)
+    )
+    assert blocked.policy_blocked is True
+    assert blocked.failure_code == "BLOCKED_BY_REMEDIATION_POLICY"
+    assert blocked.root_failure_code == "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE"
+    assert blocked.required_remediation_mode == "scene_codesign"
+    assert blocked.requires_pose_adjustment is True
+
+    pose_ok = apply_remediation_policy(
+        aperture_diag,
+        RemediationPolicySpec(mode="physics_tuning", allow_pose_adjustment=True),
+        object_dims_xyz_m=(0.156, 0.116, 0.022),
+    )
+    assert pose_ok.policy_blocked is False
+    assert pose_ok.failure_code == "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE"
+    assert pose_ok.remediation_category == "pose_adjustment"
+    assert pose_ok.required_remediation_mode == "physics_tuning"
+    assert pose_ok.requires_pose_adjustment is True
+    assert "without modifying visual" in pose_ok.upstream_remediation_hint.lower()
+
+    codesign_ok = apply_remediation_policy(
+        aperture_diag,
+        RemediationPolicySpec(mode="scene_codesign"),
+        object_dims_xyz_m=(0.156, 0.116, 0.022),
+    )
+    assert codesign_ok.policy_blocked is False
+    assert codesign_ok.remediation_category == "affordance_part"
+    assert codesign_ok.required_remediation_mode == "scene_codesign"
+
+    unpinchable_pose_blocked = apply_remediation_policy(
+        aperture_diag,
+        RemediationPolicySpec(mode="physics_tuning", allow_pose_adjustment=True),
+        object_dims_xyz_m=(0.120, 0.120, 0.120),
+    )
+    assert unpinchable_pose_blocked.policy_blocked is True
+    assert unpinchable_pose_blocked.failure_code == "BLOCKED_BY_REMEDIATION_POLICY"
+    assert unpinchable_pose_blocked.root_failure_code == "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE"
+    assert unpinchable_pose_blocked.required_remediation_mode == "scene_codesign"
+
+
+def test_solver_harness_early_stops_on_policy_blocked_diagnostic() -> None:
+    brief, embodiment = _brief_and_embodiment()
+    seen_policies: list[RemediationPolicySpec] = []
+
+    def blocking_executor(req: RolloutJobRequest) -> RolloutJobResult:
+        seen_policies.append(req.remediation_policy)
+        return RolloutJobResult(
+            job_id=req.job_id,
+            status="failed",
+            mode=req.mode,
+            final_score=0.0,
+            steps_executed=50,
+            snapshots_used=0,
+            firewall_verified=False,
+            diagnostics=SolvabilityDiagnostics(
+                failure_code="BLOCKED_BY_REMEDIATION_POLICY",
+                stage_index=0,
+                detail="blocked by strict physics_tuning policy",
+                upstream_remediation_hint="Re-run with scene_codesign or allow_pose_adjustment.",
+                remediation_category="affordance_part",
+                required_remediation_mode="scene_codesign",
+                requires_pose_adjustment=True,
+                policy_blocked=True,
+                root_failure_code="UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE",
+            ),
+        )
+
+    harness = PrivilegedSolverHarness(executor=blocking_executor, preflight_enabled=False)
+    policy = RemediationPolicySpec(mode="physics_tuning", allow_pose_adjustment=False)
+    report = harness.solve(
+        brief=brief,
+        embodiment=embodiment,
+        synthesizer=StaticControllerSynthesizer("def solve(ctx):\n    ctx.step(1)\n"),
+        config=SolveSessionConfig(max_attempts=4, remediation_policy=policy),
+    )
+    assert report.succeeded is False
+    assert report.attempts_used == 1
+    assert len(report.history) == 1
+    assert report.history[0].policy_blocked is True
+    assert report.history[0].failure_code == "BLOCKED_BY_REMEDIATION_POLICY"
+    assert report.history[0].root_failure_code == "UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE"
+    assert seen_policies == [policy]
+    md = render_repair_prompt_markdown(brief, embodiment, report.history[0])
+    assert "BLOCKED_BY_REMEDIATION_POLICY" in md
+    assert "physics_tuning" in md

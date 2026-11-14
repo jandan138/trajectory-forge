@@ -10,6 +10,20 @@ ALLOWED_CONTROL_MODES: frozenset[str] = frozenset(
 ALLOWED_EXECUTION_MODES: frozenset[str] = frozenset(
     {"privileged_search", "full_horizon_gate", "trajectory_synthesis"}
 )
+ALLOWED_REMEDIATION_MODES: frozenset[str] = frozenset(
+    {"physics_tuning", "scene_codesign"}
+)
+ALLOWED_REMEDIATION_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "none",
+        "joint_drive",
+        "collision_proxy",
+        "friction_or_offset",
+        "pose_adjustment",
+        "affordance_part",
+        "fixture_or_layout",
+    }
+)
 ALLOWED_SENSOR_MODALITIES: frozenset[str] = frozenset(
     {"proprio", "wrench", "tactile_summary", "tactile_array", "rgb", "depth"}
 )
@@ -525,6 +539,43 @@ class StageProgressEntry:
 
 
 @dataclass(frozen=True)
+class RemediationPolicySpec:
+    """Policy governing which upstream scene edits may be recommended."""
+
+    mode: str = "physics_tuning"
+    allow_pose_adjustment: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mode not in ALLOWED_REMEDIATION_MODES:
+            raise ContractValidationError(
+                f"Unsupported remediation mode: {self.mode!r}"
+            )
+
+    @property
+    def allows_pose_adjustment(self) -> bool:
+        return self.mode == "scene_codesign" or self.allow_pose_adjustment
+
+    @property
+    def allows_structural_parts(self) -> bool:
+        return self.mode == "scene_codesign"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "allow_pose_adjustment": self.allow_pose_adjustment,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> RemediationPolicySpec:
+        if not isinstance(data, Mapping):
+            return cls()
+        return cls(
+            mode=str(data.get("mode", "physics_tuning")),
+            allow_pose_adjustment=bool(data.get("allow_pose_adjustment", False)),
+        )
+
+
+@dataclass(frozen=True)
 class SolvabilityDiagnostics:
     """Structured failure diagnostics fed back to the agent or upstream scenario-forge."""
 
@@ -533,6 +584,21 @@ class SolvabilityDiagnostics:
     detail: str = ""
     colliding_pairs: tuple[tuple[str, str], ...] = ()
     upstream_remediation_hint: str = ""
+    remediation_category: str = "none"
+    required_remediation_mode: str = ""
+    requires_pose_adjustment: bool = False
+    policy_blocked: bool = False
+    root_failure_code: str = ""
+
+    def __post_init__(self) -> None:
+        if self.remediation_category not in ALLOWED_REMEDIATION_CATEGORIES:
+            raise ContractValidationError(
+                f"Unsupported remediation category: {self.remediation_category!r}"
+            )
+        if self.required_remediation_mode not in ({""} | ALLOWED_REMEDIATION_MODES):
+            raise ContractValidationError(
+                f"Unsupported required remediation mode: {self.required_remediation_mode!r}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -541,6 +607,11 @@ class SolvabilityDiagnostics:
             "detail": self.detail,
             "colliding_pairs": [list(p) for p in self.colliding_pairs],
             "upstream_remediation_hint": self.upstream_remediation_hint,
+            "remediation_category": self.remediation_category,
+            "required_remediation_mode": self.required_remediation_mode,
+            "requires_pose_adjustment": self.requires_pose_adjustment,
+            "policy_blocked": self.policy_blocked,
+            "root_failure_code": self.root_failure_code,
         }
 
     @classmethod
@@ -554,6 +625,11 @@ class SolvabilityDiagnostics:
                 for pair in data.get("colliding_pairs", ())
             ),
             upstream_remediation_hint=str(data.get("upstream_remediation_hint", "")),
+            remediation_category=str(data.get("remediation_category", "none")),
+            required_remediation_mode=str(data.get("required_remediation_mode", "")),
+            requires_pose_adjustment=bool(data.get("requires_pose_adjustment", False)),
+            policy_blocked=bool(data.get("policy_blocked", False)),
+            root_failure_code=str(data.get("root_failure_code", "")),
         )
 
 
@@ -646,6 +722,9 @@ class RolloutJobRequest:
     max_steps: int = 2000
     resume_from_snapshot_id: str | None = None
     render_media: bool = False
+    remediation_policy: RemediationPolicySpec = field(
+        default_factory=RemediationPolicySpec
+    )
     schema_version: str = "trajectory-forge-rollout-rpc/v0.1"
 
     def __post_init__(self) -> None:
@@ -671,6 +750,7 @@ class RolloutJobRequest:
             "max_steps": self.max_steps,
             "resume_from_snapshot_id": self.resume_from_snapshot_id,
             "render_media": self.render_media,
+            "remediation_policy": self.remediation_policy.to_dict(),
         }
 
     @classmethod
@@ -688,6 +768,9 @@ class RolloutJobRequest:
             max_steps=int(data.get("max_steps", 2000)),
             resume_from_snapshot_id=data.get("resume_from_snapshot_id"),
             render_media=bool(data.get("render_media", False)),
+            remediation_policy=RemediationPolicySpec.from_dict(
+                data.get("remediation_policy")
+            ),
         )
 
 

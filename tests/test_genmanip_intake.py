@@ -149,3 +149,93 @@ def test_intake_real_r3_out_of_domain_benchmark_packages() -> None:
         hero = brief.objects[hero_id]
         assert exp_dofs <= set(hero.dofs.keys())
         assert exp_frames <= set(hero.named_frames.keys())
+
+
+@pytest.mark.local_artifacts
+def test_intake_real2sim_workstation_benchmark_package() -> None:
+    suite_cfg = yaml.safe_load(
+        (REPO_ROOT / "configs" / "benchmarks" / "real2sim_workstation_suite.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    packages_root = Path(suite_cfg["source_packages_root"])
+    if not packages_root.exists():
+        pytest.skip(f"real2sim packages root not present: {packages_root}")
+
+    tasks = suite_cfg["tasks"]
+    assert len(tasks) == 1
+    entry = tasks[0]
+    pkg_id = entry["package_id"]
+    assert pkg_id == "real2sim_office_desk_riser_organize"
+
+    pkg_dir = packages_root / pkg_id
+    assert pkg_dir.exists(), f"missing real2sim package: {pkg_dir}"
+    brief = load_genmanip_collected_package(pkg_dir)
+    assert brief.package_id == pkg_id
+    assert len(brief.stages) == entry["expected_stages"] == 5
+    assert len(brief.robot_spawn.joint_positions) == 16
+    assert "desktop_riser_rig" in brief.objects
+    hero = brief.objects["desktop_riser_rig"]
+    assert {"drawer_left", "drawer_right", "laptop_lid_hinge"} <= set(hero.dofs.keys())
+    assert {"handle_right", "drawer_right_cavity", "riser_top_deck"} <= set(
+        hero.named_frames.keys()
+    )
+    for required_obj in (
+        "chocopie_pack",
+        "blue_ballpoint_pen",
+        "glass_water_mug",
+        "sprite_bottle_500ml",
+    ):
+        assert required_obj in brief.objects
+
+
+@pytest.mark.local_artifacts
+def test_intake_real_r4_out_of_domain_benchmark_packages() -> None:
+    suite_cfg = yaml.safe_load(
+        (REPO_ROOT / "configs" / "benchmarks" / "r4_out_of_domain_suite.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    packages_root = Path(suite_cfg["source_packages_root"])
+    if not packages_root.exists():
+        pytest.skip(f"r4 packages root not present: {packages_root}")
+
+    tasks = suite_cfg["tasks"]
+    assert len(tasks) == 3
+    expected = {
+        "specialty_coffee_bar_creatista_prep": (
+            6,
+            "creatista_machine",
+            {"brew_lever", "drip_tray", "select_dial", "dial_press"},
+            {"capsule_chute", "cup_spout_target"},
+        ),
+        "electronics_qa_ingun_probe_lock": (
+            5,
+            "ingun_fixture",
+            {"pressure_hood", "clamp_lever", "mode_toggle"},
+            {"pcba_nest"},
+        ),
+        "modern_office_brother_calibrate": (
+            5,
+            "brother_printer",
+            {"paper_cassette", "scanner_lid"},
+            {"platen_center"},
+        ),
+    }
+
+    for entry in tasks:
+        pkg_id = entry["package_id"]
+        pkg_dir = packages_root / pkg_id / "collected_package"
+        assert pkg_dir.exists(), f"missing r4 package: {pkg_dir}"
+        brief = load_genmanip_collected_package(pkg_dir)
+        exp_stages, hero_id, exp_dofs, exp_frames = expected[pkg_id]
+        assert brief.package_id == pkg_id
+        assert len(brief.stages) == exp_stages
+        assert len(brief.robot_spawn.joint_positions) == 16
+        assert hero_id in brief.objects
+        hero = brief.objects[hero_id]
+        assert exp_dofs <= set(hero.dofs.keys())
+        assert exp_frames <= set(hero.named_frames.keys())
+        if pkg_id == "modern_office_brother_calibrate":
+            assert "grasp" in brief.objects["a5_media_pack"].named_frames
+            assert "grasp" in brief.objects["calibration_sheet"].named_frames

@@ -3,6 +3,8 @@
 from trajectory_forge.core.contracts import (
     ALLOWED_CONTROL_MODES,
     ALLOWED_EXECUTION_MODES,
+    ALLOWED_REMEDIATION_CATEGORIES,
+    ALLOWED_REMEDIATION_MODES,
     ALLOWED_SENSOR_MODALITIES,
     ActuatorGroupSpec,
     ArticulationDofSpec,
@@ -16,6 +18,7 @@ from trajectory_forge.core.contracts import (
     NamedFrameSpec,
     ObjectContractSpec,
     PoseSpec,
+    RemediationPolicySpec,
     RobotSpawnSpec,
     RolloutJobRequest,
     RolloutJobResult,
@@ -31,6 +34,8 @@ from trajectory_forge.core.contracts import (
 __all__ = [
     "ALLOWED_CONTROL_MODES",
     "ALLOWED_EXECUTION_MODES",
+    "ALLOWED_REMEDIATION_CATEGORIES",
+    "ALLOWED_REMEDIATION_MODES",
     "ALLOWED_SENSOR_MODALITIES",
     "ActuatorGroupSpec",
     "ArticulationDofSpec",
@@ -44,6 +49,7 @@ __all__ = [
     "NamedFrameSpec",
     "ObjectContractSpec",
     "PoseSpec",
+    "RemediationPolicySpec",
     "RobotSpawnSpec",
     "RolloutJobRequest",
     "RolloutJobResult",

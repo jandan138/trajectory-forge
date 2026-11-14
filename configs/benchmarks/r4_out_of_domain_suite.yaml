@@ -1,0 +1,37 @@
+schema_version: trajectory-forge-benchmark-suite/v0.1
+suite_id: r4_out_of_domain_v01
+source_packages_root: /cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/out_of_domain_factory_r4_20261113/scene_gate/packages
+default_embodiment: lift2_r5a_bimanual
+evaluation_setting: embodied_first_exam_privileged
+remediation_policy:
+  mode: physics_tuning
+  allow_pose_adjustment: false
+
+tasks:
+  - package_id: specialty_coffee_bar_creatista_prep
+    domain: specialty_coffee_bar
+    hero_object_id: creatista_machine
+    expected_stages: 6
+    target_final_score: 1.0
+    remediation_policy:
+      mode: physics_tuning
+      allow_pose_adjustment: false
+  - package_id: electronics_qa_ingun_probe_lock
+    domain: electronics_qa_station
+    hero_object_id: ingun_fixture
+    expected_stages: 5
+    target_final_score: 1.0
+    remediation_policy:
+      mode: physics_tuning
+      allow_pose_adjustment: false
+  - package_id: modern_office_brother_calibrate
+    domain: modern_office_print_hub
+    hero_object_id: brother_printer
+    expected_stages: 5
+    target_final_score: 1.0
+    remediation_policy:
+      mode: scene_codesign
+      allow_pose_adjustment: true
+    mode2_pose_ablation_policy:
+      mode: physics_tuning
+      allow_pose_adjustment: true

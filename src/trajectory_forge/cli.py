@@ -19,6 +19,7 @@ from trajectory_forge.adapters.isaac_genmanip.ssh_executor import (
     SSHWorkerConfig,
 )
 from trajectory_forge.core.contracts import (
+    RemediationPolicySpec,
     RobotSpawnSpec,
     RolloutJobRequest,
     ScenarioIntakeBrief,
@@ -213,6 +214,10 @@ def _cmd_rollout_run(args: argparse.Namespace) -> int:
         max_steps=int(args.max_steps),
         resume_from_snapshot_id=args.resume_snapshot,
         render_media=bool(args.render_media),
+        remediation_policy=RemediationPolicySpec(
+            mode=str(args.remediation_mode),
+            allow_pose_adjustment=bool(args.allow_pose_adjustment),
+        ),
     )
     executor = _build_executor_from_args(args)
     result = executor(req)
@@ -254,6 +259,10 @@ def _cmd_solve(args: argparse.Namespace) -> int:
         synthesize_trajectory=not bool(args.no_synthesize),
         render_gate_media=bool(args.render_gate_media),
         render_synthesis_media=not bool(args.no_render_synthesis_media),
+        remediation_policy=RemediationPolicySpec(
+            mode=str(args.remediation_mode),
+            allow_pose_adjustment=bool(args.allow_pose_adjustment),
+        ),
     )
     report = harness.solve(
         brief=brief,
@@ -331,6 +340,17 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--job-id", default=None)
     run_p.add_argument("--resume-snapshot", default=None)
     run_p.add_argument("--render-media", action="store_true")
+    run_p.add_argument(
+        "--remediation-mode",
+        choices=("physics_tuning", "scene_codesign"),
+        default="physics_tuning",
+        help="Upstream scene remediation policy tier when diagnosing blockers.",
+    )
+    run_p.add_argument(
+        "--allow-pose-adjustment",
+        action="store_true",
+        help="Under physics_tuning, allow non-destructive initial pose/overhang adjustments.",
+    )
     run_p.add_argument("--out", default=None, help="Optional output path for result JSON.")
     _add_backend_arguments(run_p, allow_http_worker=True)
     run_p.set_defaults(func=_cmd_rollout_run)
@@ -351,6 +371,17 @@ def build_parser() -> argparse.ArgumentParser:
     solve_p.add_argument("--render-gate-media", action="store_true")
     solve_p.add_argument("--no-render-synthesis-media", action="store_true")
     solve_p.add_argument("--no-synthesize", action="store_true")
+    solve_p.add_argument(
+        "--remediation-mode",
+        choices=("physics_tuning", "scene_codesign"),
+        default="physics_tuning",
+        help="Upstream scene remediation policy tier when diagnosing blockers.",
+    )
+    solve_p.add_argument(
+        "--allow-pose-adjustment",
+        action="store_true",
+        help="Under physics_tuning, allow non-destructive initial pose/overhang adjustments.",
+    )
     solve_p.add_argument("--report-out", default=None, help="Optional report JSON path.")
     _add_backend_arguments(solve_p, allow_http_worker=True)
     solve_p.set_defaults(func=_cmd_solve)

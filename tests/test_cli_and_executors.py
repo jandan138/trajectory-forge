@@ -105,10 +105,33 @@ def test_cli_parser_new_subcommands_and_dry_run_rollout(tmp_path: Path) -> None:
             "ssh-isaac-genmanip",
             "--max-attempts",
             "3",
+            "--remediation-mode",
+            "scene_codesign",
+            "--allow-pose-adjustment",
         ]
     )
     assert solve_args.backend == "ssh-isaac-genmanip"
     assert solve_args.max_attempts == 3
+    assert solve_args.remediation_mode == "scene_codesign"
+    assert solve_args.allow_pose_adjustment is True
+
+    rollout_args = parser.parse_args(
+        [
+            "rollout",
+            "run",
+            "--controller",
+            str(REPO_ROOT / "examples/sample_privileged_controller.py"),
+            "--package",
+            "dummy_pkg",
+            "--embodiment",
+            str(REPO_ROOT / "configs/embodiments/lift2_r5a_bimanual.yaml"),
+            "--remediation-mode",
+            "physics_tuning",
+            "--allow-pose-adjustment",
+        ]
+    )
+    assert rollout_args.remediation_mode == "physics_tuning"
+    assert rollout_args.allow_pose_adjustment is True
 
     out_json = tmp_path / "rollout_res.json"
     rc = cli.main(

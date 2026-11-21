@@ -89,6 +89,7 @@ Verified end-to-end across `--backend isaac-genmanip` and `--backend ssh-isaac-g
 See also:
 - [Offline Self-Contained Progress Showcase Builder](scripts/build_progress_showcase_html.py) (`python scripts/build_progress_showcase_html.py` builds a single-file offline HTML with inline MP4s & keyframes under `external_artifacts/reports/`)
 - [v0.1 Architecture & Privileged Mode Contract](docs/design/architecture-v0.1.md)
+- [v0.2 Four-Engine OpenUSD Deformable & EOS Closed-Loop Architecture](docs/design/architecture-v0.2-dual-engine-deformable-eos-loop.md)
 - [Google AI Ultra Cloud Brain to RTX 4090 Sim Worker Workflow](docs/operations/ultra-cloud-to-4090-worker-workflow.md)
 - [2026-11-13 `r3` Privileged Mode Live Verification Record](docs/records/2026-11-13-r3-privileged-mode-live-verification.md)
 - [2026-11-14 `GEN-010` Real-to-Sim Workstation Live Verification Record](docs/records/2026-11-14-real2sim-workstation-live-verification.md)

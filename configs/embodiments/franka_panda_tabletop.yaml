@@ -1,0 +1,65 @@
+schema_version: trajectory-forge-embodiment-card/v0.1
+embodiment_id: franka_panda_tabletop
+runtime_robot_type: franka_panda
+action_dim: 9
+chains:
+  panda_arm:
+    chain_id: panda_arm
+    base_frame: panda_link0
+    ee_frame: panda_grasptarget
+    dof_indices: [0, 1, 2, 3, 4, 5, 6]
+    joint_names:
+      - panda_joint1
+      - panda_joint2
+      - panda_joint3
+      - panda_joint4
+      - panda_joint5
+      - panda_joint6
+      - panda_joint7
+actuator_groups:
+  gripper:
+    group_id: gripper
+    kind: parallel_gripper
+    dof_indices: [7, 8]
+    joint_names:
+      - panda_finger_joint1
+      - panda_finger_joint2
+    control_modes:
+      - position
+      - impedance
+    named_postures:
+      open: [0.04, 0.04]
+      gentle_pastry: [0.0325, 0.0325]
+      crush_pastry: [0.014, 0.014]
+      pinch_cloth: [0.004, 0.004]
+      closed: [0.0, 0.0]
+sensor_streams:
+  joint_state:
+    stream_id: joint_state
+    modality: proprio
+    rate_hz: 60.0
+    shape: [9]
+    attached_group: panda_arm
+    privileged: false
+  ee_tactile:
+    stream_id: ee_tactile
+    modality: tactile_summary
+    rate_hz: 60.0
+    shape: [2, 4]
+    attached_group: gripper
+    privileged: false
+  wrist_wrench:
+    stream_id: wrist_wrench
+    modality: wrench
+    rate_hz: 60.0
+    shape: [6]
+    attached_group: panda_arm
+    privileged: false
+  overhead_rgb:
+    stream_id: overhead_rgb
+    modality: rgb
+    rate_hz: 30.0
+    shape: [720, 1280, 3]
+    privileged: false
+notes: 7-DOF Franka Emika Panda arm + 2-DOF parallel gripper with bilateral finger tactile pads and wrist wrench telemetry.
+

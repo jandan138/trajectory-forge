@@ -10,3 +10,4 @@ build/
 outputs/
 external_artifacts/
 spool/
+MUJOCO_LOG.TXT

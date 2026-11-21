@@ -29,6 +29,20 @@ FORBIDDEN_IMPORT_MARKERS = (
     "from mujoco",
     "import torch",
     "from torch",
+    "import genesis",
+    "from genesis",
+    "import newton",
+    "from newton",
+    "import warp",
+    "from warp",
+    "import gsplat",
+    "from gsplat",
+    "import sam2",
+    "from sam2",
+    "import cotracker",
+    "from cotracker",
+    "import trellis",
+    "from trellis",
 )
 FORBIDDEN_IDENTITY_RE = re.compile(r"\b(astra)\b", re.IGNORECASE)
 

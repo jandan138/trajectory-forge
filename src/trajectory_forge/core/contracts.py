@@ -134,6 +134,72 @@ class ArticulationDofSpec:
 
 
 @dataclass(frozen=True)
+class DeformableContractSpec:
+    """Deformable integrity & cross-engine material contract for an object."""
+
+    asset_id: str
+    structural_family: str
+    youngs_modulus_pa: float
+    poissons_ratio: float
+    strain_metric: str
+    strain_onset_a: float
+    strain_failure_b: float
+    damage_threshold: float = 0.25
+    max_normal_force_n: float = 60.0
+    mass_kg: float = 0.1
+    dimensions_m: tuple[float, float, float] = (0.07, 0.07, 0.028)
+    engine_configs: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.asset_id.strip():
+            raise ContractValidationError("DeformableContractSpec.asset_id must not be empty")
+        if self.structural_family not in {"soft_solid", "cloth_sheet", "rod_cable", "shell"}:
+            raise ContractValidationError(
+                f"Unsupported structural_family {self.structural_family!r}; expected one of soft_solid, cloth_sheet, rod_cable, shell"
+            )
+        if self.strain_onset_a < 0.0 or self.strain_failure_b <= self.strain_onset_a:
+            raise ContractValidationError(
+                "DeformableContractSpec requires 0 <= strain_onset_a < strain_failure_b"
+            )
+        if not (0.0 < self.damage_threshold <= 1.0):
+            raise ContractValidationError("DeformableContractSpec.damage_threshold must lie in (0, 1]")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "asset_id": self.asset_id,
+            "structural_family": self.structural_family,
+            "youngs_modulus_pa": self.youngs_modulus_pa,
+            "poissons_ratio": self.poissons_ratio,
+            "strain_metric": self.strain_metric,
+            "strain_onset_a": self.strain_onset_a,
+            "strain_failure_b": self.strain_failure_b,
+            "damage_threshold": self.damage_threshold,
+            "max_normal_force_n": self.max_normal_force_n,
+            "mass_kg": self.mass_kg,
+            "dimensions_m": list(self.dimensions_m),
+            "engine_configs": dict(self.engine_configs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> DeformableContractSpec:
+        dims = tuple(float(v) for v in data.get("dimensions_m", (0.07, 0.07, 0.028)))
+        return cls(
+            asset_id=str(data["asset_id"]),
+            structural_family=str(data["structural_family"]),
+            youngs_modulus_pa=float(data["youngs_modulus_pa"]),
+            poissons_ratio=float(data["poissons_ratio"]),
+            strain_metric=str(data["strain_metric"]),
+            strain_onset_a=float(data["strain_onset_a"]),
+            strain_failure_b=float(data["strain_failure_b"]),
+            damage_threshold=float(data.get("damage_threshold", 0.25)),
+            max_normal_force_n=float(data.get("max_normal_force_n", 60.0)),
+            mass_kg=float(data.get("mass_kg", 0.1)),
+            dimensions_m=(dims[0], dims[1], dims[2]),
+            engine_configs={str(k): str(v) for k, v in data.get("engine_configs", {}).items()},
+        )
+
+
+@dataclass(frozen=True)
 class ObjectContractSpec:
     """Scene object or articulated hero asset parsed from runtime contract."""
 
@@ -145,9 +211,10 @@ class ObjectContractSpec:
     named_frames: dict[str, NamedFrameSpec] = field(default_factory=dict)
     dofs: dict[str, ArticulationDofSpec] = field(default_factory=dict)
     reset_joint_positions: tuple[float, ...] = ()
+    deformable: DeformableContractSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "object_id": self.object_id,
             "runtime_uid": self.runtime_uid,
             "role": self.role,
@@ -157,9 +224,13 @@ class ObjectContractSpec:
             "dofs": {k: v.to_dict() for k, v in self.dofs.items()},
             "reset_joint_positions": list(self.reset_joint_positions),
         }
+        if self.deformable is not None:
+            payload["deformable"] = self.deformable.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ObjectContractSpec:
+        raw_def = data.get("deformable")
         return cls(
             object_id=str(data["object_id"]),
             runtime_uid=str(data["runtime_uid"]),
@@ -175,6 +246,11 @@ class ObjectContractSpec:
                 for k, v in data.get("dofs", {}).items()
             },
             reset_joint_positions=tuple(float(v) for v in data.get("reset_joint_positions", ())),
+            deformable=(
+                DeformableContractSpec.from_dict(raw_def)
+                if raw_def is not None
+                else None
+            ),
         )
 
 

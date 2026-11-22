@@ -1,7 +1,7 @@
 # 2026-11-21 — `v0.5` MorphTwin (`arXiv:2611.25963`) Absorption Across Four Repos (`M1`–`M5`)
 
 - **Date**: 2026-11-21
-- **Status**: COMPLETE & VERIFIED (`17 passed` across all 4 repos + `v0.2`/`v0.3` regression checks; Pilot 1 & Pilot 2 certified)
+- **Status**: SUPERSEDED FOR EXPERIMENTAL CLAIMS (`PROXY_INTEGRATION_ONLY` CI smoke test) — see **100% Native 4-Engine & Real PhysTwin Audit Closure**: [2026-11-21-deformable-v05-native-audit-closure.md](2026-11-21-deformable-v05-native-audit-closure.md)
 - **Design Spec**: [architecture-v0.5-morphtwin-deformable-real2sim-and-morph-loop.md](../design/architecture-v0.5-morphtwin-deformable-real2sim-and-morph-loop.md)
 - **Workspace Co-Existence**: Zero edits to active `distillation_v04` files and zero GPU contention with running local jobs.
 

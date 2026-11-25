@@ -813,7 +813,7 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     th_rack.AddTranslateOp().Set(Gf.Vec3d(-0.335, +0.025, 0.750))
     for si in range(8):
         ang = 2.0 * math.pi * si / 8.0
-        _add_invisible_col("/World/Environment/ThermoBenchRack", f"Pillar_{si}", "box", (0.0124 * math.cos(ang), 0.0124 * math.sin(ang), 0.06205), (0.0040, 0.0085, 0.1241), bench_mat, quat_wxyz=(math.cos(0.5 * ang), 0.0, 0.0, math.sin(0.5 * ang)))
+        _add_invisible_col("/World/Environment/ThermoBenchRack", f"Pillar_{si}", "box", (0.0124 * math.cos(ang), 0.0124 * math.sin(ang), 0.06205), (0.0040, 0.0085, 0.1241), taper_glide_mat, quat_wxyz=(math.cos(0.5 * ang), 0.0, 0.0, math.sin(0.5 * ang)))
         vp = UsdGeom.Cube.Define(stage, f"/World/Environment/ThermoBenchRack/Vis_{si}")
         vp.CreateSizeAttr(1.0)
         vxf = UsdGeom.Xformable(vp)
@@ -968,7 +968,8 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     # 3a. Dynamic Heating Stirrer Bath (`hollow 12-wall cylinder resting on Blue Scissor Jack!`)
     bath_p = "/World/Instruments/heating_stirrer_bath"
     _config_dynamic_rb(bath_p, 1.85, lin_damp=1.8, ang_damp=3.0)
-    _add_invisible_col(bath_p, "BathFloor", "box", (0.0, 0.0, 0.024), (0.190, 0.190, 0.048), bench_mat)
+    # True circular cylindrical base (`r=0.095m`, matching real round water bath — eliminates phantom square-box corner at r=0.134m!)
+    _add_invisible_col(bath_p, "BathFloor", "cylinder", (0.0, 0.0, 0.024), (0.095, 0.048), bench_mat, axis="Z")
     # Non-slip silicone-lined submerged trivet (`top z_local = 0.0625m -> z_world = 0.8970m`, firmly grounding Bulb at z_flk = 0.9390m for 0° pitch!)
     non_slip_trivet_mat = _make_phys_mat("BathTrivetMat", 0.0 if zero_friction else 0.95, 0.0 if zero_friction else 0.85, comb_grip)
     _add_invisible_col(bath_p, "BathSubmergedTrivet", "box", (0.0, 0.0, 0.0560), (0.130, 0.130, 0.013), non_slip_trivet_mat)
@@ -1071,18 +1072,26 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     )
     manipulated_prims.append(cond_p)
 
+    # Upgraded Route A D6-DER Elastic Cooling Hoses (`2 x 24` links with calibrated bending/torsion drives
+    # compiled from ConvertAsset/hose_softbody_v10 -> replaces zero-stiffness SphericalJoint bead chain!)
+    # Far ends terminate cleanly on the Lab Cold-Water Faucet Brass Barb (+0.390,-0.245,0.855) & Embedded PP Sink (-0.390,-0.245,0.798)!
     UsdGeom.Scope.Define(stage, "/World/PhysHoseChains")
     hose_chain_xfs: dict[str, list[Any]] = {"inlet": [], "outlet": []}
     n_hlinks = 24
+    k_hose_bend_d6 = 0.00024  # Soft amber-latex D6-DER elastic bending (prevents roll on rest & whip during S06 15-deg tilt!)
+    c_hose_bend_d6 = 0.00010
+    k_hose_twist_d6 = 0.00048
+    c_hose_twist_d6 = 0.00014
     for hkey, barb_local, p_start_w, p_end_w in (
-        ("inlet", np.array([0.074, -0.016, -0.032]), np.array([0.020 + 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([0.390, -0.185, 0.855])),
-        ("outlet", np.array([-0.074, -0.016, -0.032]), np.array([0.020 - 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([-0.390, -0.185, 0.805])),
+        ("inlet", np.array([0.074, -0.016, -0.032]), np.array([0.020 + 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([0.390, -0.245, 0.855])),
+        ("outlet", np.array([-0.074, -0.016, -0.032]), np.array([0.020 - 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([-0.390, -0.245, 0.798])),
     ):
         nodes = []
         for i in range(n_hlinks + 1):
             s = i / float(n_hlinks)
             pt = (1.0 - s) * p_start_w + s * p_end_w
-            pt[1] -= 0.185 * math.sin(math.pi * s)
+            # Natural double-fold bench slack (arc ~0.563 m > 0.499 m max S06 lift reach while staying y >= -0.353 m on bench!)
+            pt[1] -= 0.115 * math.sin(math.pi * s) - 0.055 * math.sin(3.0 * math.pi * s)
             pt[2] = max(0.758, float(pt[2]) - 0.045 * math.sin(math.pi * s))
             nodes.append(pt)
         prev_b = cond_p
@@ -1097,13 +1106,32 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
             _add_invisible_col(lp, "Cap", "sphere", (0.0, 0.0, 0.0), (0.0052,), bench_mat)
             manipulated_prims.append(lp)
             hose_chain_xfs[hkey].append(UsdGeom.Xformable(lxf.GetPrim()))
-            sj = UsdPhysics.SphericalJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_j_{li:02d}")
-            sj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
-            sj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
             d0 = barb_local if li == 0 else (pa - 0.5 * (nodes[li - 1] + nodes[li]))
             d1 = pa - mid
-            sj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, d0)))
-            sj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
+            if li == 0:
+                sj = UsdPhysics.SphericalJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_j_{li:02d}")
+                sj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
+                sj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
+                sj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, d0)))
+                sj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
+            else:
+                # Route A D6-DER elastic joint (locked translations + soft-latex bending & torsional angular drives!)
+                dj = UsdPhysics.Joint.Define(stage, f"/World/PhysHoseChains/{hkey}_d6_{li:02d}")
+                dj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
+                dj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
+                dj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, d0)))
+                dj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
+                for ax in ("transX", "transY", "transZ"):
+                    lim = UsdPhysics.LimitAPI.Apply(dj.GetPrim(), ax)
+                    lim.CreateLowAttr(1.0)
+                    lim.CreateHighAttr(-1.0)
+                for ax, kv, cv in (("rotX", k_hose_twist_d6, c_hose_twist_d6), ("rotY", k_hose_bend_d6, c_hose_bend_d6), ("rotZ", k_hose_bend_d6, c_hose_bend_d6)):
+                    drv = UsdPhysics.DriveAPI.Apply(dj.GetPrim(), ax)
+                    drv.CreateTypeAttr("force")
+                    drv.CreateStiffnessAttr().Set(float(kv))
+                    drv.CreateDampingAttr().Set(float(cv))
+                    drv.CreateMaxForceAttr().Set(0.0022)
+                    drv.CreateTargetPositionAttr().Set(0.0)
             prev_b = lp
         sj_end = UsdPhysics.SphericalJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_j_anchor")
         sj_end.CreateBody1Rel().SetTargets([Sdf.Path(prev_b)])
@@ -1587,11 +1615,11 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
         pts_in = [b_in] + [
             np.array(list(xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()), dtype=np.float64)
             for xf in hose_chain_xfs["inlet"]
-        ] + [np.array([0.390, -0.185, 0.855], dtype=np.float64)]
+        ] + [np.array([0.390, -0.245, 0.855], dtype=np.float64)]
         pts_out = [b_out] + [
             np.array(list(xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()), dtype=np.float64)
             for xf in hose_chain_xfs["outlet"]
-        ] + [np.array([-0.390, -0.185, 0.805], dtype=np.float64)]
+        ] + [np.array([-0.390, -0.245, 0.798], dtype=np.float64)]
         c64_in = _upsample_catmull_centerline(np.asarray(pts_in), 64)
         c64_out = _upsample_catmull_centerline(np.asarray(pts_out), 64)
         vin, nin = skin_cosserat_tube(c64_in)

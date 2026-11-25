@@ -469,12 +469,12 @@ def synthesize_v09_s01_s12_schedule(
 
     p_epick_sky = np.array([+0.455, +0.015, 1.220], dtype=np.float64)
     p_epick = np.array([+0.455, +0.015, 0.750 + 0.084], dtype=np.float64)
-    # Horizontal low-clearance slide onto White Scissor Jack (`+X -> -X` to exact drip tip X=+0.215 at z_erl=0.799m, 17mm below visual drip tip!)
-    p_eplace_side_hov = np.array([+0.315, -0.005, 1.220], dtype=np.float64)
-    p_eplace_side = np.array([+0.315, -0.005, 0.799 + 0.084], dtype=np.float64)
-    p_eplace_hov = np.array([+0.210, -0.005, 1.220], dtype=np.float64)
-    p_eplace = np.array([+0.210, -0.005, 0.799 + 0.084], dtype=np.float64)
-    p_eplace_lifted = np.array([+0.210, -0.005, 0.824 + 0.084], dtype=np.float64)
+    # Horizontal low-clearance slide onto White Scissor Jack (`+X -> -X` to exact drip tip X=+0.210, Y=0.000 at z_erl=0.799m, 17mm below visual drip tip!)
+    p_eplace_side_hov = np.array([+0.315, 0.000, 1.220], dtype=np.float64)
+    p_eplace_side = np.array([+0.315, 0.000, 0.799 + 0.084], dtype=np.float64)
+    p_eplace_hov = np.array([+0.210, 0.000, 1.220], dtype=np.float64)
+    p_eplace = np.array([+0.210, 0.000, 0.799 + 0.084], dtype=np.float64)
+    p_eplace_lifted = np.array([+0.210, 0.000, 0.824 + 0.084], dtype=np.float64)
     _, q_epick_sky, q_epick = _walk_cartesian_chain([p_home_R, p_epick_sky, p_epick], R_topR, bR, qR, q_anchor_first=q_home_R)
     _, q_eplace_side_hov, q_eplace_side, q_eplace, q_eplace_hov, q_eplace_lifted = _walk_cartesian_chain(
         [p_epick_sky, p_eplace_side_hov, p_eplace_side, p_eplace, p_eplace_hov, p_eplace_lifted],

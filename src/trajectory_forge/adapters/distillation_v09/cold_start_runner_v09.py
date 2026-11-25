@@ -22,6 +22,7 @@ def run_cold_start_v09_episode(
     zero_friction: bool = False,
     record_video: bool = True,
     max_frames: int = 0,
+    hose_mode: str = "d6_der",
     timeout_s: int = 3600,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -38,12 +39,16 @@ def run_cold_start_v09_episode(
         "zero_friction": bool(zero_friction),
         "record_video": bool(record_video),
         "max_frames": int(max_frames),
+        "hose_mode": str(hose_mode),
     }
     job_json.write_text(json.dumps(job_payload, indent=2), encoding="utf-8")
 
     env = os.environ.copy()
     env["ISAACSIM_PORTABLE_ROOT"] = r"I:\isaacsim-data\6.0.1"
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+    tf_src = Path(__file__).resolve().parents[3]
+    dev_root = tf_src.parents[1]
+    ca_root = dev_root / "ConvertAsset"
+    env["PYTHONPATH"] = os.pathsep.join([str(tf_src), str(ca_root)])
 
     t0 = time.perf_counter()
     creationflags = 0x00004000 if os.name == "nt" else 0

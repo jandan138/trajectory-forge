@@ -53,12 +53,14 @@ def test_local_executor_build_command_and_env(tmp_path: Path) -> None:
         genmanip_root=genmanip_root,
         curobo_src=curobo_src,
         omni_scratch_dir=tmp_path / "scratch",
-        base_env={"PATH": "/usr/bin"},
+        base_env={"PATH": "/usr/bin", "CUDA_VISIBLE_DEVICES": "2"},
     )
     assert str(curobo_src.resolve()) in env["PYTHONPATH"]
     assert str(genmanip_root.resolve()) in env["PYTHONPATH"]
     assert str((REPO_ROOT / "src").resolve()) in env["PYTHONPATH"]
     assert env["OMNI_USER_DATA_DIR"].endswith("omni_data")
+    assert env["CE_SIM_GPU_ID"] == "2"
+    assert "CUDA_VISIBLE_DEVICES" not in env
 
 
 def test_ssh_executor_build_commands(tmp_path: Path) -> None:

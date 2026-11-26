@@ -18,7 +18,16 @@ from trajectory_forge.adapters.isaac_genmanip.ssh_executor import (
     SSHIsaacGenManipExecutor,
     SSHWorkerConfig,
 )
+from trajectory_forge.adapters.lerobot_v2.executor import (
+    DEFAULT_LEROBOT_PYTHON,
+    LeRobotExportConfig,
+    export_lerobot_dataset,
+)
 from trajectory_forge.core.contracts import (
+    BatchEpisodeOutcome,
+    BatchEpisodeSpec,
+    BatchSynthesisReport,
+    BatchSynthesisRequest,
     RemediationPolicySpec,
     RobotSpawnSpec,
     RolloutJobRequest,
@@ -31,6 +40,10 @@ from trajectory_forge.intake.genmanip_intake import (
     render_agent_brief_markdown,
 )
 from trajectory_forge.sdk.context import run_controller_preflight
+from trajectory_forge.trajectory.lerobot_converter import (
+    LeRobotEpisodeInputSpec,
+    load_lerobot_staging_manifest,
+)
 from trajectory_forge.solver import (
     ControllerSynthesizer,
     OpenAICompatibleSynthesizer,
@@ -280,6 +293,173 @@ def _cmd_solve(args: argparse.Namespace) -> int:
     return 0 if report.succeeded else 1
 
 
+def _parse_batch_episodes(args: argparse.Namespace, package_id: str) -> tuple[BatchEpisodeSpec, ...]:
+    if args.episodes_json:
+        raw_eps = json.loads(Path(args.episodes_json).read_text(encoding="utf-8"))
+        return tuple(BatchEpisodeSpec.from_dict(item) for item in raw_eps)
+    seeds = (
+        [int(tok.strip()) for tok in args.seeds.split(",") if tok.strip()]
+        if args.seeds
+        else list(range(int(args.num_episodes)))
+    )
+    return tuple(
+        BatchEpisodeSpec(
+            episode_id=f"{package_id}_ep_{idx:04d}_seed_{seed}",
+            seed=seed,
+        )
+        for idx, seed in enumerate(seeds)
+    )
+
+
+def _cmd_batch_synthesize(args: argparse.Namespace) -> int:
+    card = load_embodiment_card(Path(args.embodiment))
+    pkg_path = Path(args.package)
+    brief = load_genmanip_collected_package(pkg_path)
+    package_ref = str(pkg_path.resolve()) if pkg_path.exists() else args.package
+    code = Path(args.controller).read_text(encoding="utf-8")
+    episodes = _parse_batch_episodes(args, brief.package_id)
+    batch_id = args.batch_id or f"{brief.package_id}_batch"
+    req = BatchSynthesisRequest(
+        batch_id=batch_id,
+        scenario_package_ref=package_ref,
+        embodiment_id=card.embodiment_id,
+        controller_code=code,
+        episodes=episodes,
+        max_steps=int(args.max_steps),
+        camera_stride=int(args.camera_stride),
+        capture_wrist_cameras=not bool(args.no_wrist_cameras),
+        render_media=bool(args.render_media),
+    )
+
+    if args.backend == "dry-run":
+        outcomes: list[BatchEpisodeOutcome] = []
+        for ep in req.episodes:
+            res = run_controller_preflight(
+                req.controller_code,
+                brief,
+                card,
+                mode="trajectory_synthesis",
+                max_steps=req.max_steps,
+                job_id=ep.episode_id,
+            )
+            outcomes.append(
+                BatchEpisodeOutcome(
+                    episode_id=ep.episode_id,
+                    seed=ep.seed,
+                    status=res.status,
+                    final_score=res.final_score,
+                    steps_executed=res.steps_executed,
+                    snapshots_used=res.snapshots_used,
+                    firewall_verified=res.firewall_verified,
+                    trajectory_manifest=res.trajectory_manifest,
+                    failure_code=res.diagnostics.failure_code,
+                    detail=res.diagnostics.detail,
+                )
+            )
+        report = BatchSynthesisReport(
+            batch_id=req.batch_id,
+            scenario_package_ref=req.scenario_package_ref,
+            embodiment_id=req.embodiment_id,
+            outcomes=tuple(outcomes),
+            accepted_count=sum(1 for o in outcomes if o.status == "succeeded"),
+            failed_count=sum(1 for o in outcomes if o.status != "succeeded"),
+        )
+    elif args.backend == "isaac-genmanip":
+        executor = LocalIsaacGenManipExecutor(
+            IsaacGenManipWorkerConfig(
+                isaac_python=Path(args.isaac_python),
+                genmanip_root=Path(args.genmanip_root),
+                package_store_root=Path(args.package_store),
+                output_root=Path(args.output_root).resolve(),
+                curobo_src=Path(args.curobo_src),
+                timeout_s=float(args.timeout),
+            )
+        )
+        report = executor.execute_batch(req)
+    else:
+        raise SystemExit(
+            f"batch-synthesize supports dry-run or isaac-genmanip, got {args.backend!r}"
+        )
+
+    rendered = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    if args.report_out:
+        out_path = Path(args.report_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    return 0 if report.accepted_count == len(report.outcomes) else 1
+
+
+def _cmd_export_lerobot(args: argparse.Namespace) -> int:
+    instruction_map: dict[str, str] = {}
+    if args.instruction_map:
+        instruction_map = json.loads(Path(args.instruction_map).read_text(encoding="utf-8"))
+
+    specs: list[LeRobotEpisodeInputSpec] = []
+    if args.staging_manifest:
+        specs.extend(load_lerobot_staging_manifest(Path(args.staging_manifest)))
+    for report_path_str in args.batch_report or ():
+        report = BatchSynthesisReport.from_dict(
+            json.loads(Path(report_path_str).read_text(encoding="utf-8"))
+        )
+        pkg_brief = None
+        pkg_path = Path(report.scenario_package_ref)
+        if pkg_path.exists():
+            pkg_brief = load_genmanip_collected_package(pkg_path)
+        for outcome in report.outcomes:
+            if outcome.status != "succeeded" or outcome.trajectory_manifest is None:
+                continue
+            manifest = outcome.trajectory_manifest
+            instruction = (
+                instruction_map.get(outcome.episode_id)
+                or instruction_map.get(manifest.scenario_id)
+                or args.default_instruction
+                or (pkg_brief.instruction if pkg_brief is not None else "")
+            )
+            if not instruction:
+                raise SystemExit(
+                    f"Missing instruction for episode {outcome.episode_id!r}; pass --instruction-map or --default-instruction"
+                )
+            specs.append(
+                LeRobotEpisodeInputSpec(
+                    episode_id=outcome.episode_id,
+                    npz_path=manifest.artifact_relpath,
+                    manifest=manifest,
+                    instruction=instruction,
+                    base_locked=not bool(args.unlocked_base),
+                )
+            )
+    if not specs:
+        raise SystemExit("export-lerobot found zero accepted episodes to export")
+
+    result = export_lerobot_dataset(
+        episodes=specs,
+        output_dir=Path(args.output_dir),
+        config=LeRobotExportConfig(
+            lerobot_python=Path(args.lerobot_python),
+            fps=int(args.fps),
+            robot_type=str(args.robot_type),
+            repo_id=args.repo_id,
+            overwrite=bool(args.overwrite),
+            timeout_s=float(args.timeout),
+        ),
+    )
+    print(
+        json.dumps(
+            {
+                "repo_id": result.repo_id,
+                "output_dir": str(result.output_dir),
+                "fps": result.fps,
+                "total_episodes": result.total_episodes,
+                "total_frames": result.total_frames,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trajectory-forge",
@@ -385,6 +565,52 @@ def build_parser() -> argparse.ArgumentParser:
     solve_p.add_argument("--report-out", default=None, help="Optional report JSON path.")
     _add_backend_arguments(solve_p, allow_http_worker=True)
     solve_p.set_defaults(func=_cmd_solve)
+
+    batch_p = sub.add_parser(
+        "batch-synthesize",
+        help="Warm multi-episode trajectory synthesis inside one simulator process.",
+    )
+    batch_p.add_argument("--batch-id", default=None)
+    batch_p.add_argument("--package", required=True, help="Collected package directory.")
+    batch_p.add_argument("--embodiment", required=True, help="Path to EmbodimentCard YAML.")
+    batch_p.add_argument("--controller", required=True, help="Controller .py path.")
+    batch_p.add_argument("--num-episodes", type=int, default=4)
+    batch_p.add_argument("--seeds", default=None, help="Comma-separated seed list.")
+    batch_p.add_argument("--episodes-json", default=None, help="JSON list of BatchEpisodeSpec.")
+    batch_p.add_argument("--max-steps", type=int, default=2000)
+    batch_p.add_argument("--camera-stride", type=int, default=4)
+    batch_p.add_argument("--no-wrist-cameras", action="store_true")
+    batch_p.add_argument("--render-media", action="store_true")
+    batch_p.add_argument("--report-out", default=None)
+    _add_backend_arguments(batch_p, allow_http_worker=False)
+    batch_p.set_defaults(func=_cmd_batch_synthesize)
+
+    export_p = sub.add_parser(
+        "export-lerobot",
+        help="Export firewall-verified .npz episodes to LeRobot v2.1 format.",
+    )
+    export_p.add_argument(
+        "--batch-report",
+        nargs="+",
+        default=None,
+        help="One or more BatchSynthesisReport JSON files.",
+    )
+    export_p.add_argument(
+        "--staging-manifest",
+        default=None,
+        help="Staging manifest JSON produced by write_lerobot_staging_manifest.",
+    )
+    export_p.add_argument("--output-dir", required=True, help="Destination LeRobot dataset dir.")
+    export_p.add_argument("--repo-id", default=None)
+    export_p.add_argument("--fps", type=int, default=15)
+    export_p.add_argument("--robot-type", default="lift2")
+    export_p.add_argument("--lerobot-python", default=str(DEFAULT_LEROBOT_PYTHON))
+    export_p.add_argument("--instruction-map", default=None)
+    export_p.add_argument("--default-instruction", default=None)
+    export_p.add_argument("--unlocked-base", action="store_true")
+    export_p.add_argument("--overwrite", action="store_true")
+    export_p.add_argument("--timeout", type=float, default=1800.0)
+    export_p.set_defaults(func=_cmd_export_lerobot)
 
     return parser
 

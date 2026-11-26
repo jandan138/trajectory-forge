@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from numpy.typing import NDArray
 from omni.isaac.core.utils.types import ArticulationAction
-from pxr import PhysxSchema, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics, Vt
 from scipy.spatial.transform import Rotation as R
 
 from trajectory_forge.core.contracts import (
@@ -39,6 +39,18 @@ from trajectory_forge.sdk.math3d import (
 from trajectory_forge.solver.diagnostics import (
     apply_remediation_policy,
     compute_sequential_blocking_stage,
+)
+from trajectory_forge.adapters.isaac_genmanip.pbd_metrics import (
+    evaluate_scene_pbd_containment,
+    extract_pbd_goal_specs,
+    register_pbd_containment_metric,
+    sync_stage_pbd_isosurface_materials,
+)
+from trajectory_forge.trajectory.fluid_helpers import (
+    compute_aabb_containment_ratio,
+    compute_vessel_fill_bounds,
+    scale_ticks_for_physics_dt,
+    transform_points_local_to_world,
 )
 
 
@@ -97,12 +109,21 @@ def link6_world_to_tcp_world(p_link6: NDArray[Any], q_link6_wxyz: NDArray[Any]) 
     )
 
 
-def fix_lift2_finger_collider_offsets(stage: Usd.Stage, robot_prim_path: str) -> int:
-    """Fix R5a finger collision restOffset >= contactOffset PhysX warnings and friction in-memory."""
+def fix_lift2_finger_collider_offsets(stage: Any, robot_prim_path: str) -> int:
+    """Fix R5a finger colliders, dummy_base mass, and friction while preserving mimic-joint gripper physics."""
     updated = 0
     for prim in stage.Traverse():
         pstr = str(prim.GetPath())
         if not pstr.startswith(robot_prim_path):
+            continue
+        pname = prim.GetName()
+        if pname in {"h_link5", "h_link6"} and prim.IsA(UsdGeom.Imageable):
+            UsdGeom.Imageable(prim).GetVisibilityAttr().Set(UsdGeom.Tokens.invisible)
+            updated += 1
+            continue
+        if pname in {"dummy_base_x", "dummy_base_y", "dummy_base_rotate"}:
+            UsdPhysics.MassAPI.Apply(prim).CreateMassAttr().Set(1.0)
+            updated += 1
             continue
         if ("/link7/" in pstr or "/link8/" in pstr) and prim.HasAPI(UsdPhysics.CollisionAPI):
             c_attr = prim.GetAttribute("physxCollision:contactOffset")
@@ -111,22 +132,45 @@ def fix_lift2_finger_collider_offsets(stage: Usd.Stage, robot_prim_path: str) ->
             c_val = c_attr.Get() if c_attr and c_attr.HasValue() else None
             r_val = r_attr.Get() if r_attr and r_attr.HasValue() else None
             if c_val is None or r_val is None or float(c_val) <= float(r_val) or float(c_val) <= 0.0:
-                p_api.CreateContactOffsetAttr(0.004)
-                p_api.CreateRestOffsetAttr(0.0005)
+                p_api.CreateContactOffsetAttr().Set(0.004)
+                p_api.CreateRestOffsetAttr().Set(0.0005)
                 updated += 1
-        elif prim.GetName() == "PhysicsMaterial" or prim.HasAPI(UsdPhysics.MaterialAPI):
+        elif pname == "PhysicsMaterial" or prim.HasAPI(UsdPhysics.MaterialAPI):
             mat_api = UsdPhysics.MaterialAPI.Apply(prim)
             s_attr = prim.GetAttribute("physics:staticFriction")
             d_attr = prim.GetAttribute("physics:dynamicFriction")
             s_val = float(s_attr.Get()) if s_attr and s_attr.HasValue() and s_attr.Get() is not None else 0.0
             d_val = float(d_attr.Get()) if d_attr and d_attr.HasValue() and d_attr.Get() is not None else 0.0
             if s_val < 0.8:
-                mat_api.CreateStaticFrictionAttr(0.8)
+                mat_api.CreateStaticFrictionAttr().Set(0.8)
             if d_val < 0.8:
-                mat_api.CreateDynamicFrictionAttr(0.8)
+                mat_api.CreateDynamicFrictionAttr().Set(0.8)
             p_mat_api = PhysxSchema.PhysxMaterialAPI.Apply(prim)
-            p_mat_api.CreateImprovePatchFrictionAttr(True)
+            p_mat_api.CreateImprovePatchFrictionAttr().Set(True)
     return updated
+
+
+def reset_articulation_velocities_and_base(scene: Any) -> None:
+    """Zero robot dummy-base DOFs and velocities on all articulations and rigid objects at reset."""
+    from genmanip.utils.usd_utils.prim_utils import clean_prim_velocity
+
+    if getattr(scene, "robot_list", None):
+        emb = scene.robot_list[0]
+        base_idx = list(getattr(emb, "base_dof_indices", ()) or ())
+        if base_idx:
+            zeros_base = np.zeros(len(base_idx), dtype=float)
+            emb.robot.set_joint_positions(zeros_base, joint_indices=base_idx)
+            emb.target_base_pose = zeros_base.copy()
+        num_dofs = len(np.asarray(emb.robot.get_joint_positions(), dtype=float))
+        emb.robot.set_joint_velocities(np.zeros(num_dofs, dtype=float))
+    for art in (getattr(scene, "articulation_list", None) or {}).values():
+        dof_names = getattr(art, "dof_names", None) or ()
+        if len(dof_names) > 0 and hasattr(art, "set_joint_velocities"):
+            art.set_joint_velocities(np.zeros(len(dof_names), dtype=float))
+    for obj in (getattr(scene, "object_list", None) or {}).values():
+        ppath = getattr(obj, "prim_path", None)
+        if ppath:
+            clean_prim_velocity(str(ppath))
 
 
 def configure_articulation_drives_at_reset(scene: Any, initial_layout: Mapping[str, Any]) -> None:
@@ -141,8 +185,16 @@ def configure_articulation_drives_at_reset(scene: Any, initial_layout: Mapping[s
         if art_prim_path:
             root_prim = stage.GetPrimAtPath(art_prim_path)
             if root_prim and root_prim.IsValid():
+                epoch_attr = root_prim.GetAttribute("device:resetEpoch")
+                if epoch_attr and epoch_attr.IsValid():
+                    cur_epoch = epoch_attr.Get()
+                    epoch_attr.Set(int(cur_epoch or 0) + 1)
                 for child in Usd.PrimRange(root_prim):
                     if not (child.IsA(UsdPhysics.RevoluteJoint) or child.IsA(UsdPhysics.PrismaticJoint)):
+                        c_epoch = child.GetAttribute("device:resetEpoch")
+                        if c_epoch and c_epoch.IsValid():
+                            cur_epoch = c_epoch.Get()
+                            c_epoch.Set(int(cur_epoch or 0) + 1)
                         continue
                     jname = child.GetName()
                     stiff = 0.0
@@ -164,6 +216,180 @@ def configure_articulation_drives_at_reset(scene: Any, initial_layout: Mapping[s
                 targets.append(None)
         if any_stiff:
             art.apply_action(ArticulationAction(joint_positions=targets))
+
+
+def _transform_local_pbd_pts(
+    pts_local: Sequence[tuple[float, float, float]],
+    pos: Sequence[float],
+    wxyz: Sequence[float],
+) -> list[tuple[float, float, float]]:
+    rot = R.from_quat([float(wxyz[1]), float(wxyz[2]), float(wxyz[3]), float(wxyz[0])])
+    arr = rot.apply(np.asarray(pts_local, dtype=float)) + np.asarray(pos, dtype=float).reshape(1, 3)
+    return [(float(r[0]), float(r[1]), float(r[2])) for r in arr]
+
+
+def snapshot_and_reset_stage_pbd_particles(
+    scene: Any,
+    initial_layout: Mapping[str, Any] | None = None,
+    *,
+    stop_world: bool = True,
+    use_live_host_pose: bool = False,
+) -> int:
+    """Snapshot t=0 GPU PBD particle points once per scene and restore under host pose on reset."""
+    stage = scene.world.stage
+    cache: dict[str, tuple[list[tuple[float, float, float]], list[tuple[float, float, float]], str | None]] | None = getattr(
+        scene, "_ce_op_t0_pbd_particles", None
+    )
+    if cache is None:
+        cache = {}
+        for prim in stage.Traverse():
+            if not (prim.IsA(UsdGeom.Points) and prim.HasAPI(PhysxSchema.PhysxParticleSetAPI)):
+                continue
+            host_attr = prim.GetAttribute("fluid:hostVesselUid")
+            host_uid = str(host_attr.Get()) if (host_attr and host_attr.HasValue() and host_attr.Get()) else None
+            loc_attr = prim.GetAttribute("fluid:initialLocalPoints")
+            if loc_attr and loc_attr.HasValue() and loc_attr.Get():
+                pts_val = loc_attr.Get()
+            else:
+                pts_val = UsdGeom.Points(prim).GetPointsAttr().Get()
+            if not pts_val:
+                continue
+            pts_list = [(float(p[0]), float(p[1]), float(p[2])) for p in pts_val]
+            zeros_list = [(0.0, 0.0, 0.0) for _ in pts_list]
+            cache[str(prim.GetPath())] = (pts_list, zeros_list, host_uid)
+        setattr(scene, "_ce_op_t0_pbd_particles", cache)
+
+    restored = 0
+    layout = initial_layout or {}
+    if stop_world and cache and layout and hasattr(scene.world, "is_playing") and scene.world.is_playing():
+        scene.world.stop()
+    for ppath, (pts_list, zeros_list, host_uid) in cache.items():
+        prim = stage.GetPrimAtPath(ppath)
+        if not prim or not prim.IsValid():
+            continue
+        pts_target = pts_list
+        host_pos = None
+        host_ori = None
+        if host_uid:
+            host_obj = getattr(scene, "object_list", {}).get(host_uid)
+            if use_live_host_pose and host_obj is not None and hasattr(host_obj, "get_world_pose"):
+                live_pos, live_ori = host_obj.get_world_pose()
+                host_pos = [float(x) for x in live_pos]
+                host_ori = [float(x) for x in live_ori]
+            elif host_uid in layout and isinstance(layout[host_uid], Mapping):
+                entry = layout[host_uid]
+                if "position" in entry and "orientation" in entry:
+                    host_pos = [float(x) for x in entry["position"]]
+                    host_ori = [float(x) for x in entry["orientation"]]
+                    if host_obj is not None:
+                        if hasattr(host_obj, "set_default_state"):
+                            host_obj.set_default_state(
+                                position=np.asarray(host_pos, dtype=float),
+                                orientation=np.asarray(host_ori, dtype=float),
+                            )
+                        if hasattr(host_obj, "set_world_pose"):
+                            host_obj.set_world_pose(host_pos, host_ori)
+        if host_pos is not None and host_ori is not None:
+            pts_target = _transform_local_pbd_pts(pts_list, host_pos, host_ori)
+        vec_pts = Vt.Vec3fArray([Gf.Vec3f(*p) for p in pts_target])
+        vec_zeros = Vt.Vec3fArray([Gf.Vec3f(*v) for v in zeros_list])
+        pts_geom = UsdGeom.Points(prim)
+        if pts_geom.GetPointsAttr():
+            pts_geom.GetPointsAttr().Set(vec_pts)
+        sim_pts_attr = prim.GetAttribute("physxParticle:simulationPoints")
+        if sim_pts_attr and sim_pts_attr.IsValid():
+            sim_pts_attr.Set(vec_pts)
+        vel_attr = pts_geom.GetVelocitiesAttr()
+        if vel_attr and vel_attr.IsValid():
+            vel_attr.Set(vec_zeros)
+        else:
+            pv_attr = prim.GetAttribute("velocities")
+            if pv_attr and pv_attr.IsValid():
+                pv_attr.Set(vec_zeros)
+        restored += 1
+    return restored
+
+
+def prelift_fixed_base_torso_at_reset(
+    scene: Any,
+    target_lift_m: float = 0.46,
+    *,
+    physics_dt: float = 1.0 / 60.0,
+) -> None:
+    """Smoothly elevate the Lift2 torso and settle before t=0 to match online evaluation reset."""
+    if not getattr(scene, "robot_list", None):
+        return
+    emb_obj = scene.robot_list[0]
+    fq = np.asarray(emb_obj.robot.get_joint_positions(), dtype=float).copy()
+    init_16 = fq[emb_obj.default_dof_indices].copy()
+    init_base = fq[emb_obj.base_dof_indices].copy()
+    s_lift = float(fq[emb_obj.body_dof_indices[0]])
+    ramp_steps = scale_ticks_for_physics_dt(20, physics_dt)
+    hold_steps = scale_ticks_for_physics_dt(16, physics_dt)
+    for k in range(1, ramp_steps + 1):
+        fq[emb_obj.default_dof_indices] = init_16
+        fq[emb_obj.body_dof_indices] = [s_lift + (target_lift_m - s_lift) * (k / float(ramp_steps))]
+        fq[emb_obj.base_dof_indices] = init_base
+        emb_obj.robot_view.set_joint_position_targets(fq.tolist())
+        scene.world.step(render=False)
+    for _ in range(hold_steps):
+        fq[emb_obj.default_dof_indices] = init_16
+        fq[emb_obj.body_dof_indices] = [target_lift_m]
+        fq[emb_obj.base_dof_indices] = init_base
+        emb_obj.robot_view.set_joint_position_targets(fq.tolist())
+        scene.world.step(render=False)
+
+
+def _quat_wxyz_to_rot(q_wxyz: NDArray[Any]) -> R:
+    return R.from_quat([float(q_wxyz[1]), float(q_wxyz[2]), float(q_wxyz[3]), float(q_wxyz[0])])
+
+
+def _refine_ik_dls(
+    planner: Any,
+    p_goal: NDArray[Any],
+    q_goal_wxyz: NDArray[Any],
+    q_init: NDArray[Any],
+) -> tuple[NDArray[Any], float]:
+    """Refine a 6-DOF arm IK seed to sub-0.05 mm accuracy via batched-FK damped least squares."""
+    import torch
+
+    dev = planner.tensor_args.device
+    jl = planner.ik_solver.kinematics.get_joint_limits()
+    q_lo = jl.position[0, :6].detach().cpu().numpy().astype(np.float64)
+    q_hi = jl.position[1, :6].detach().cpu().numpy().astype(np.float64)
+    q = np.clip(np.asarray(q_init, dtype=np.float64).copy(), q_lo, q_hi)
+    r_goal = _quat_wxyz_to_rot(q_goal_wxyz)
+    eps = 1e-4
+    eye6 = np.eye(6, dtype=np.float64)
+    best_q = q.copy()
+    best_cost = 1e9
+    for _ in range(16):
+        batch = np.vstack([q[None, :], q[None, :] + eps * eye6]).astype(np.float32)
+        res = planner.ik_solver.fk(torch.from_numpy(batch).to(dev))
+        pos = res.ee_position.detach().cpu().numpy().astype(np.float64)
+        quat = res.ee_quaternion.detach().cpu().numpy().astype(np.float64)
+        p_err = p_goal - pos[0]
+        r0 = _quat_wxyz_to_rot(quat[0])
+        r_err = (r_goal * r0.inv()).as_rotvec()
+        err = np.concatenate([p_err, r_err])
+        cost = float(np.linalg.norm(p_err) + 0.2 * np.linalg.norm(r_err))
+        if cost < best_cost:
+            best_cost = cost
+            best_q = q.copy()
+        if np.linalg.norm(p_err) < 4e-5 and np.linalg.norm(r_err) < 4e-4:
+            break
+        jac = np.zeros((6, 6), dtype=np.float64)
+        for j in range(6):
+            dp = (pos[j + 1] - pos[0]) / eps
+            rj = _quat_wxyz_to_rot(quat[j + 1])
+            dr = (rj * r0.inv()).as_rotvec() / eps
+            jac[:, j] = np.concatenate([dp, dr])
+        dq = jac.T @ np.linalg.solve(jac @ jac.T + (2e-3**2) * eye6, err)
+        max_step = float(np.max(np.abs(dq)))
+        if max_step > 0.12:
+            dq *= 0.12 / max_step
+        q = np.clip(q + dq, q_lo, q_hi)
+    return best_q, best_cost
 
 
 def _wrap_goal_leaves(goal: Any) -> Any:
@@ -205,6 +431,9 @@ class IsaacGenManipSimBackend:
         output_root: Path,
         max_steps: int = 2000,
         render_camera: Any | None = None,
+        sensor_cameras: Mapping[str, Any] | None = None,
+        camera_stride: int = 4,
+        episode_id: str | None = None,
         physics_dt: float = 1.0 / 60.0,
         metric_eval_stride: int = 4,
     ) -> None:
@@ -219,6 +448,9 @@ class IsaacGenManipSimBackend:
         self.output_root = output_root
         self.max_steps = max_steps
         self.render_camera = render_camera
+        self.sensor_cameras: dict[str, Any] = dict(sensor_cameras or {})
+        self.camera_stride = max(1, int(camera_stride))
+        self.episode_id = episode_id
         self.physics_dt = physics_dt
         self.metric_eval_stride = max(1, metric_eval_stride)
 
@@ -236,13 +468,20 @@ class IsaacGenManipSimBackend:
         self._target_lift = float(full_q[self.emb.body_dof_indices[0]])
         if not hasattr(self.emb, "target_base_pose") or self.emb.target_base_pose is None:
             self.emb.target_base_pose = full_q[self.emb.base_dof_indices].copy()
+        self._initial_base_pose = np.asarray(self.emb.target_base_pose, dtype=float).copy()
 
         # Build standalone per-stage leaf evaluators so any stage can be queried independently at any time.
         from genmanip.core.metrics.metrics_manager import MetricsManager
         from genmanip.core.metrics.utils import MetricFactory
         import genmanip.extensions.metrics  # noqa: F401
 
+        register_pbd_containment_metric()
         raw_goal = task_data.get("goal", [])
+        self._pbd_goal_specs: list[dict[str, Any]] = extract_pbd_goal_specs(raw_goal)
+        self._pbd_containment_t0: list[dict[str, Any]] = [
+            evaluate_scene_pbd_containment(scene, spec) for spec in self._pbd_goal_specs
+        ]
+        self._iso_mesh_logged: set[str] = set()
         wrapped_goal = MetricsManager.ensure_list_nesting(_wrap_goal_leaves(raw_goal), 3)
         self._standalone_stage_metrics: list[list[list[Any]]] = []
         for stage_entry in wrapped_goal:
@@ -273,9 +512,23 @@ class IsaacGenManipSimBackend:
         self._traj_base_target: list[NDArray[Any]] = []
         self._traj_torso_lift: list[float] = []
         self._traj_timestamps: list[float] = []
+        self._traj_state_ee_pose: list[NDArray[Any]] = []
+        self._traj_action_ee_pose: list[NDArray[Any]] = []
+        self._traj_camera_step_indices: list[int] = []
+        self._traj_sensor_frames: dict[str, list[NDArray[Any]]] = {
+            name: [] for name in self.sensor_cameras
+        }
         self._traj_rgb_frames: list[NDArray[Any]] = []
         self._media_keyframes: list[tuple[str, str, NDArray[Any]]] = []
         self._video_frames: list[NDArray[Any]] = []
+        self._pbd_dispensers: list[dict[str, Any]] = []
+        self._weight_scales: list[dict[str, Any]] = []
+        self._bean_grinders: list[dict[str, Any]] = []
+        self._closeup_camera: Any = None
+        self._init_pbd_dispensers()
+        self._init_weight_scales()
+        self._init_bean_grinders()
+        self._init_closeup_camera()
 
         rob_pos0, _ = self.emb.robot.get_world_pose()
         p_l0, q_l0 = self.emb.robot_base_left.get_world_pose()
@@ -623,6 +876,101 @@ class IsaacGenManipSimBackend:
             "stage_scores": list(self.live_stage_scores()),
         }
 
+    def live_fluid_containment_ratio(
+        self,
+        vessel_id: str,
+        *,
+        particle_prim_path: str | None = None,
+        fallback: float = 0.0,
+    ) -> float:
+        stage = self.scene.world.stage
+        # Support rigid-body granule sets (e.g. /World/CoffeeBeans) for unified containment telemetry
+        if particle_prim_path and particle_prim_path.startswith("/World/CoffeeBeans"):
+            if self._weight_scales:
+                sc = self._weight_scales[0]
+                bowl_x, bowl_y, bowl_z = sc["bowl_xyz"]
+                n_tot = len(sc["bean_prims"])
+                if n_tot == 0:
+                    return float(fallback)
+                n_in = 0
+                if vessel_id == "single_dose_grinder" and self._bean_grinders:
+                    gr = self._bean_grinders[0]
+                    gx, gy, gz = gr["hopper_xyz"]
+                    for bp in sc["bean_prims"]:
+                        pos, _ = bp.get_world_pose()
+                        r = float(np.hypot(float(pos[0]) - gx, float(pos[1]) - gy))
+                        if r <= 0.062 and (gz - 0.130) <= float(pos[2]) <= (gz + 0.090):
+                            n_in += 1
+                    return float(n_in / n_tot)
+                if vessel_id == "bean_weighing_bowl":
+                    # Support BOTH static bowl (v5) and dynamic graspable bowl (v6)!
+                    try:
+                        b_pose = self.live_object_pose("bean_weighing_bowl")
+                        bx, by, bz = b_pose.xyz
+                    except Exception:
+                        bx, by, bz = bowl_x, bowl_y, bowl_z
+                    for bp in sc["bean_prims"]:
+                        pos, _ = bp.get_world_pose()
+                        r = float(np.hypot(float(pos[0]) - bx, float(pos[1]) - by))
+                        if r <= 0.056 and (bz - 0.004) <= float(pos[2]) <= (bz + 0.080):
+                            n_in += 1
+                    return float(n_in / n_tot)
+                try:
+                    v_pose = self.live_object_pose(vessel_id)
+                    vx, vy, vz = v_pose.xyz
+                    for bp in sc["bean_prims"]:
+                        pos, _ = bp.get_world_pose()
+                        r = float(np.hypot(float(pos[0]) - vx, float(pos[1]) - vy))
+                        if r <= 0.038 and (vz - 0.005) <= float(pos[2]) <= (vz + 0.095):
+                            n_in += 1
+                    return float(n_in / n_tot)
+                except Exception:
+                    return float(fallback)
+        target_prim = None
+        if particle_prim_path:
+            cand = stage.GetPrimAtPath(particle_prim_path)
+            if cand and cand.IsValid() and cand.IsA(UsdGeom.Points):
+                target_prim = cand
+        if target_prim is None:
+            for prim in stage.Traverse():
+                if prim.IsA(UsdGeom.Points) and prim.HasAPI(PhysxSchema.PhysxParticleSetAPI):
+                    target_prim = prim
+                    break
+        if target_prim is None:
+            return float(fallback)
+        pts_raw = UsdGeom.Points(target_prim).GetPointsAttr().Get()
+        if not pts_raw:
+            return float(fallback)
+        self._xform_cache.Clear()
+        gf_mat = self._xform_cache.GetLocalToWorldTransform(target_prim)
+        sx = float(gf_mat.GetRow3(0).GetLength() or 1.0)
+        sy = float(gf_mat.GetRow3(1).GetLength() or 1.0)
+        sz = float(gf_mat.GetRow3(2).GetLength() or 1.0)
+        mat_ortho = gf_mat.RemoveScaleShear()
+        trans = gf_mat.ExtractTranslation()
+        rot_q = mat_ortho.ExtractRotationQuat()
+        imag = rot_q.GetImaginary()
+        world_pose = Pose3D(
+            xyz=(float(trans[0]), float(trans[1]), float(trans[2])),
+            wxyz=normalize_quat_wxyz(
+                (float(rot_q.GetReal()), float(imag[0]), float(imag[1]), float(imag[2]))
+            ),
+        )
+        pts_local = [(float(p[0]) * sx, float(p[1]) * sy, float(p[2]) * sz) for p in pts_raw]
+        pts_world = transform_points_local_to_world(pts_local, world_pose)
+        try:
+            aabb = self.live_object_aabb(vessel_id)
+        except KeyError:
+            return float(fallback)
+        fill_min, fill_max = compute_vessel_fill_bounds(aabb.min_xyz, aabb.max_xyz)
+        return float(
+            compute_aabb_containment_ratio(
+                pts_world,
+                box_min=fill_min,
+                box_max=fill_max,
+            )
+        )
+
     def _arm_name(self, chain: str) -> str:
         if chain == "left_arm":
             return "left"
@@ -662,22 +1010,64 @@ class IsaacGenManipSimBackend:
         planner, sl, arm = self._planner_and_slice(chain)
         p_l6, q_l6 = tcp_world_to_link6_world(target_pose)
         p_arm, q_arm = self.emb._transform_goal_pose((p_l6, q_l6), arm=arm)
+        p_goal = np.asarray(p_arm, dtype=np.float64)
+        q_goal = np.asarray(q_arm, dtype=np.float64)
         pose_7d = np.concatenate([np.asarray(p_arm, dtype=float), np.asarray(q_arm, dtype=float)])
         cur_seed = (
             np.asarray(seed_6dof, dtype=float)
             if seed_6dof is not None
             else np.asarray(self._target_16dof[sl], dtype=float)
         )
+        q_loc, c_loc = _refine_ik_dls(planner, p_goal, q_goal, cur_seed)
+        if c_loc < 1.5e-3:
+            return q_loc
         candidates = [
             cur_seed,
             np.zeros(6, dtype=float),
             np.array([0.0, 0.8, 1.0, 0.0, 0.5, 0.0], dtype=float),
             np.array([0.3 if arm == "left" else -0.3, 1.0, 1.1, 0.0, 0.4, 0.0], dtype=float),
         ]
+        refined_pool: list[tuple[NDArray[Any], float]] = []
         for seed in candidates:
             sol = planner.ik_single(pose_7d, seed)
             if sol is not None:
-                return np.asarray(sol[:6], dtype=float)
+                q_ref, c_ref = _refine_ik_dls(planner, p_goal, q_goal, np.asarray(sol[:6], dtype=np.float64))
+                refined_pool.append((q_ref, c_ref))
+        if not refined_pool and hasattr(planner, "ik_solver") and hasattr(planner, "tensor_args"):
+            from curobo.types.math import Pose
+            import torch
+
+            dev = planner.tensor_args.device
+            gp = Pose(
+                torch.tensor(p_goal, dtype=torch.float32, device=dev).unsqueeze(0),
+                torch.tensor(q_goal, dtype=torch.float32, device=dev).unsqueeze(0),
+            )
+            res = planner.ik_solver.solve_single(gp)
+            if bool(res.success.item()):
+                sol_raw = res.solution[0, 0, :6].detach().cpu().numpy()
+                q_ref, c_ref = _refine_ik_dls(planner, p_goal, q_goal, np.asarray(sol_raw, dtype=np.float64))
+                refined_pool.append((q_ref, c_ref))
+        if not refined_pool and hasattr(planner, "ik_solver") and hasattr(planner, "tensor_args"):
+            s_sign = 1.0 if arm == "left" else -1.0
+            dls_seeds = [
+                cur_seed,
+                np.zeros(6, dtype=float),
+                np.array([0.0, 0.6, 0.9, 0.0, 0.5, 0.0], dtype=float),
+                np.array([0.4 * s_sign, 0.9, 1.1, 0.0, 0.4, 0.0], dtype=float),
+                np.array([-0.4 * s_sign, 0.8, 1.0, 0.5 * s_sign, 0.5, 0.0], dtype=float),
+                np.array([0.0, 1.1, 1.3, 0.0, 0.3, 0.0], dtype=float),
+                np.array([0.7 * s_sign, 0.7, 0.8, 0.0, 0.6, 0.0], dtype=float),
+                np.array([-0.7 * s_sign, 0.7, 0.8, -0.5 * s_sign, 0.6, 0.0], dtype=float),
+            ]
+            for d_seed in dls_seeds:
+                q_ref, c_ref = _refine_ik_dls(planner, p_goal, q_goal, d_seed)
+                if c_ref < 2.0e-3:
+                    refined_pool.append((q_ref, c_ref))
+        if refined_pool:
+            accurate = [item for item in refined_pool if item[1] < 5e-3]
+            pool = accurate if accurate else refined_pool
+            best_q_ref, _ = min(pool, key=lambda item: float(np.linalg.norm(item[0] - cur_seed)))
+            return best_q_ref
         raise RuntimeError(
             f"CuRobo IK failed for chain={chain!r} tcp_xyz={target_pose.xyz} "
             f"arm_rel_xyz={tuple(round(float(v), 4) for v in p_arm)}"
@@ -691,6 +1081,8 @@ class IsaacGenManipSimBackend:
         return tuple(float(v) for v in sol)
 
     def _apply_robot_targets(self) -> None:
+        if self.embodiment.base_locked:
+            self.emb.target_base_pose = self._initial_base_pose.copy()
         self._full_dof_targets[self.emb.default_dof_indices] = self._target_16dof
         self._full_dof_targets[self.emb.body_dof_indices] = [float(self._target_lift)]
         self._full_dof_targets[self.emb.base_dof_indices] = np.asarray(
@@ -698,20 +1090,30 @@ class IsaacGenManipSimBackend:
         )
         self.emb.robot_view.set_joint_position_targets(self._full_dof_targets.tolist())
 
-    def _grab_camera_rgb(self, accum_renders: int = 1) -> NDArray[Any] | None:
-        if self.render_camera is None:
+    @staticmethod
+    def _resize_rgb_wh(rgb: NDArray[Any], target_wh: tuple[int, int] = (640, 480)) -> NDArray[Any]:
+        target_w, target_h = target_wh
+        if rgb.shape[1] == target_w and rgb.shape[0] == target_h:
+            return rgb
+        import cv2
+
+        return np.asarray(
+            cv2.resize(rgb, (target_w, target_h), interpolation=cv2.INTER_LINEAR),
+            dtype=np.uint8,
+        )
+
+    def _extract_camera_rgb(self, camera: Any) -> NDArray[Any] | None:
+        if camera is None:
             return None
         from genmanip.utils.usd_utils.camera_utils import get_src
 
-        for _ in range(accum_renders):
-            self.scene.world.render()
         raw = None
-        if getattr(self.render_camera, "_rgb_annotator", None) is not None:
-            ann = self.render_camera._rgb_annotator.get_data()
+        if getattr(camera, "_rgb_annotator", None) is not None:
+            ann = camera._rgb_annotator.get_data()
             if isinstance(ann, np.ndarray) and ann.size > 0:
                 raw = ann[:, :, :3]
         if raw is None:
-            raw = get_src(self.render_camera, "rgb")
+            raw = get_src(camera, "rgb")
         if raw is None:
             return None
         arr = np.asarray(raw)
@@ -724,6 +1126,51 @@ class IsaacGenManipSimBackend:
         if f_arr.size and float(np.percentile(f_arr, 99.0)) <= 2.0:
             f_arr = f_arr * 255.0
         return np.clip(f_arr, 0.0, 255.0).astype(np.uint8)
+
+    def _sync_pbd_visual_instancers(self) -> None:
+        """Ensure native PhysX PBD Isosurface meshes have glossy fluid materials bound
+        and raw particle points remain hidden (no coarse PointInstancer beads)."""
+        if not hasattr(self, "_iso_mesh_logged"):
+            self._iso_mesh_logged = set()
+        sync_stage_pbd_isosurface_materials(
+            self.scene.world.stage,
+            log_sink=self.controller_logs,
+            logged_paths=self._iso_mesh_logged,
+        )
+
+    def _grab_camera_rgb(
+        self, accum_renders: int = 1, camera: Any | None = None
+    ) -> NDArray[Any] | None:
+        cam = self.render_camera if camera is None else camera
+        if cam is None:
+            return None
+        self._sync_pbd_visual_instancers()
+        for _ in range(accum_renders):
+            self.scene.world.render()
+        rgb = self._extract_camera_rgb(cam)
+        if rgb is not None and camera is None:
+            return self._compose_pip_frame(rgb)
+        return rgb
+
+    def _fk_ee_pose_14d(self, q_16dof: NDArray[Any]) -> NDArray[np.float32]:
+        try:
+            (p_l, q_l), (p_r, q_r) = self.emb.fk_single(np.asarray(q_16dof, dtype=float))
+            vec = np.concatenate(
+                [
+                    np.asarray(p_l, dtype=np.float32).reshape(3),
+                    np.asarray(q_l, dtype=np.float32).reshape(4),
+                    np.asarray(p_r, dtype=np.float32).reshape(3),
+                    np.asarray(q_r, dtype=np.float32).reshape(4),
+                ]
+            )
+            return np.asarray(vec, dtype=np.float32)
+        except Exception:  # noqa: BLE001
+            return np.zeros(14, dtype=np.float32)
+
+    @property
+    def recorded_sensor_streams(self) -> tuple[str, ...]:
+        """Return stream names that captured at least one valid RGB frame."""
+        return tuple(k for k, frames in self._traj_sensor_frames.items() if frames)
 
     def _evaluate_metrics_tick(self, *, force: bool = False) -> None:
         if not force and (self.steps_executed % self.metric_eval_stride != 0):
@@ -753,28 +1200,353 @@ class IsaacGenManipSimBackend:
                     )
                     self._video_frames.append(frame)
 
+    def _init_pbd_dispensers(self) -> None:
+        stage = self.scene.world.stage
+        for prim in stage.Traverse():
+            if not (prim.IsA(UsdGeom.Points) and prim.HasAPI(PhysxSchema.PhysxParticleSetAPI)):
+                continue
+            trig_obj_attr = prim.GetAttribute("fluid:dispenseTriggerObject")
+            trig_jnt_attr = prim.GetAttribute("fluid:dispenseTriggerJoint")
+            if not (trig_obj_attr and trig_obj_attr.HasValue() and trig_jnt_attr and trig_jnt_attr.HasValue()):
+                continue
+            thr_attr = prim.GetAttribute("fluid:dispenseTriggerThreshold")
+            shutter_attr = prim.GetAttribute("fluid:dispenseShutterPrim")
+            shutter_path = str(shutter_attr.Get()) if (shutter_attr and shutter_attr.HasValue() and shutter_attr.Get()) else ""
+            shutter_closed_xyz = None
+            if shutter_path:
+                sp = stage.GetPrimAtPath(shutter_path)
+                if sp and sp.IsValid():
+                    t_attr = sp.GetAttribute("xformOp:translate")
+                    if t_attr and t_attr.HasValue():
+                        tv = t_attr.Get()
+                        shutter_closed_xyz = (float(tv[0]), float(tv[1]), float(tv[2]))
+            self._pbd_dispensers.append(
+                {
+                    "prim_path": str(prim.GetPath()),
+                    "trigger_object": str(trig_obj_attr.Get()),
+                    "trigger_joint": str(trig_jnt_attr.Get()),
+                    "threshold": float(thr_attr.Get()) if (thr_attr and thr_attr.HasValue()) else 0.0018,
+                    "shutter_path": shutter_path,
+                    "shutter_closed_xyz": shutter_closed_xyz,
+                    "open_progress": 0.0,
+                    "triggered": False,
+                }
+            )
+
+    def _tick_pbd_dispensers(self) -> None:
+        stage = self.scene.world.stage
+        # Bind visual fluid materials onto runtime-generated PhysX Isosurface meshes once created
+        if not getattr(self, "_iso_mats_bound", False):
+            from pxr import UsdShade
+            bound_any = False
+            for sys_p, mat_p in (
+                ("/World/PBD_EspressoSystem/Isosurface", "/World/Looks/PBD_EspressoMat"),
+                ("/World/PBD_MilkSystem/Isosurface", "/World/Looks/PBD_SteamedMilkMat"),
+            ):
+                iso_pr = stage.GetPrimAtPath(sys_p)
+                mat_pr = stage.GetPrimAtPath(mat_p)
+                if iso_pr and iso_pr.IsValid() and mat_pr and mat_pr.IsValid():
+                    UsdShade.MaterialBindingAPI.Apply(iso_pr).Bind(UsdShade.Material(mat_pr))
+                    bound_any = True
+            if bound_any:
+                self._iso_mats_bound = True
+        if not self._pbd_dispensers:
+            return
+        for disp in self._pbd_dispensers:
+            if not disp["triggered"]:
+                try:
+                    q = self.live_joint_value(disp["trigger_object"], disp["trigger_joint"])
+                except Exception:
+                    q = 0.0
+                if q >= disp["threshold"]:
+                    disp["triggered"] = True
+            if disp["triggered"] and disp["shutter_path"] and disp["shutter_closed_xyz"] is not None:
+                if disp["open_progress"] < 1.0:
+                    disp["open_progress"] = min(1.0, disp["open_progress"] + 0.05)
+                    sp = stage.GetPrimAtPath(disp["shutter_path"])
+                    if sp and sp.IsValid():
+                        t_attr = sp.GetAttribute("xformOp:translate")
+                        if t_attr and t_attr.IsValid():
+                            cx, cy, cz = disp["shutter_closed_xyz"]
+                            # Slide bottom shutter smoothly +0.14 m in +Y to release espresso stream!
+                            t_attr.Set(Gf.Vec3d(cx, cy + 0.14 * disp["open_progress"], cz))
+        self._tick_weight_scales()
+
+    def _init_weight_scales(self) -> None:
+        stage = self.scene.world.stage
+        for prim in stage.Traverse():
+            pref_attr = prim.GetAttribute("scale:beanPrefix")
+            if not (pref_attr and pref_attr.HasValue() and pref_attr.Get()):
+                continue
+            prefix = str(pref_attr.Get())
+            lcd_attr = prim.GetAttribute("scale:lcdTexturePath")
+            sh_attr = prim.GetAttribute("scale:lcdShaderPath")
+            bowl_attr = prim.GetAttribute("scale:bowlWorldPos")
+            gpb_attr = prim.GetAttribute("scale:gramsPerBean")
+            if not (lcd_attr and lcd_attr.HasValue() and sh_attr and sh_attr.HasValue() and bowl_attr and bowl_attr.HasValue()):
+                continue
+            bv = bowl_attr.Get()
+            bowl_xyz = (float(bv[0]), float(bv[1]), float(bv[2]))
+            gpb = float(gpb_attr.Get()) if (gpb_attr and gpb_attr.HasValue()) else 0.75
+            bean_paths = sorted(
+                str(p.GetPath()) for p in stage.Traverse() if str(p.GetPath()).startswith(prefix) and p.IsA(UsdGeom.Xform)
+            )
+            try:
+                from omni.isaac.core.prims import RigidPrim
+                bean_prims = [RigidPrim(bp) for bp in bean_paths]
+            except Exception:
+                bean_prims = []
+            if bean_prims:
+                self._weight_scales.append(
+                    {
+                        "lcd_base_path": Path(str(lcd_attr.Get())),
+                        "shader_path": str(sh_attr.Get()),
+                        "bowl_xyz": bowl_xyz,
+                        "grams_per_bean": gpb,
+                        "bean_prims": bean_prims,
+                        "last_count": -1,
+                    }
+                )
+
+    def _render_scale_lcd(self, out_path: Path, grams: float, n_beans: int, n_total: int) -> None:
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.new("RGB", (512, 224), (10, 14, 16))
+        d = ImageDraw.Draw(img)
+        ready = grams >= 15.0
+        border_col = (34, 214, 128) if ready else (60, 120, 96)
+        d.rounded_rectangle([8, 8, 504, 216], radius=16, fill=(14, 20, 22), outline=border_col, width=4)
+        try:
+            f_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
+            f_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 92)
+            f_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        except Exception:
+            f_sm = f_lg = f_md = ImageFont.load_default()
+        d.text((26, 20), "STARBUCKS BARISTA SCALE", fill=(160, 210, 185), font=f_sm)
+        badge_txt = "DOSE READY" if ready else f"BEANS {n_beans:02d}/{n_total:02d}"
+        badge_col = (24, 180, 102) if ready else (45, 75, 65)
+        d.rounded_rectangle([318, 16, 488, 54], radius=10, fill=badge_col)
+        d.text((332, 22), badge_txt, fill=(245, 255, 248), font=f_sm)
+        val_col = (90, 255, 165) if ready else (225, 252, 238)
+        d.text((38, 72), f"{grams:5.1f} g", fill=val_col, font=f_lg)
+        d.text((36, 178), f"TARGET: {n_total * 0.75:.1f} g   TARE: 0.0 g", fill=(130, 175, 155), font=f_md)
+        img.save(out_path)
+
+    def _tick_weight_scales(self) -> None:
+        if not self._weight_scales or (self.steps_executed % 6 != 0):
+            return
+        stage = self.scene.world.stage
+        for sc in self._weight_scales:
+            bx, by, bz = sc["bowl_xyz"]
+            n_in = 0
+            for bp in sc["bean_prims"]:
+                try:
+                    pos, _ = bp.get_world_pose()
+                    r = float(np.hypot(float(pos[0]) - bx, float(pos[1]) - by))
+                    if r <= 0.056 and (bz - 0.004) <= float(pos[2]) <= (bz + 0.080):
+                        n_in += 1
+                except Exception:
+                    continue
+            if n_in != sc["last_count"]:
+                sc["last_count"] = n_in
+                grams = n_in * sc["grams_per_bean"]
+                out_png = sc["lcd_base_path"].with_name(f"{sc['lcd_base_path'].stem}_{n_in:02d}.png")
+                try:
+                    self._render_scale_lcd(out_png, grams, n_in, len(sc["bean_prims"]))
+                    sh_prim = stage.GetPrimAtPath(sc["shader_path"])
+                    if sh_prim and sh_prim.IsValid():
+                        file_attr = sh_prim.GetAttribute("inputs:file")
+                        if file_attr and file_attr.IsValid():
+                            file_attr.Set(str(out_png))
+                except Exception:
+                    pass
+                self.controller_logs.append(
+                    f"[BARISTA_SCALE_LIVE] step={self.steps_executed} beans_in_bowl={n_in}/{len(sc['bean_prims'])} weight={grams:.2f}g"
+                )
+        self._tick_bean_grinders()
+
+    def _init_bean_grinders(self) -> None:
+        stage = self.scene.world.stage
+        for prim in stage.Traverse():
+            pref_attr = prim.GetAttribute("grinder:beanPrefix")
+            if not (pref_attr and pref_attr.HasValue() and pref_attr.Get()):
+                continue
+            prefix = str(pref_attr.Get())
+            hop_attr = prim.GetAttribute("grinder:hopperWorldPos")
+            sh_attr = prim.GetAttribute("grinder:shutterPrim")
+            ring_attr = prim.GetAttribute("grinder:statusRingPrim")
+            trig_attr = prim.GetAttribute("grinder:triggerBeans")
+            if not (hop_attr and hop_attr.HasValue() and sh_attr and sh_attr.HasValue()):
+                continue
+            hv = hop_attr.Get()
+            hopper_xyz = (float(hv[0]), float(hv[1]), float(hv[2]))
+            shutter_path = str(sh_attr.Get())
+            shutter_closed_xyz = None
+            sp = stage.GetPrimAtPath(shutter_path)
+            if sp and sp.IsValid():
+                ta = sp.GetAttribute("xformOp:translate")
+                if ta and ta.HasValue():
+                    tv = ta.Get()
+                    shutter_closed_xyz = (float(tv[0]), float(tv[1]), float(tv[2]))
+            bean_paths = sorted(
+                str(p.GetPath()) for p in stage.Traverse() if str(p.GetPath()).startswith(prefix) and p.IsA(UsdGeom.Xform)
+            )
+            try:
+                from omni.isaac.core.prims import RigidPrim
+                bean_prims = [RigidPrim(bp) for bp in bean_paths]
+            except Exception:
+                bean_prims = []
+            if bean_prims:
+                self._bean_grinders.append(
+                    {
+                        "hopper_xyz": hopper_xyz,
+                        "shutter_path": shutter_path,
+                        "shutter_closed_xyz": shutter_closed_xyz,
+                        "ring_path": str(ring_attr.Get()) if (ring_attr and ring_attr.HasValue()) else "",
+                        "trigger_beans": int(trig_attr.Get()) if (trig_attr and trig_attr.HasValue()) else 14,
+                        "bean_prims": bean_prims,
+                        "state": "WAIT",
+                        "triggered_step": -1,
+                        "open_progress": 0.0,
+                        "max_in_grinder": 0,
+                    }
+                )
+
+    def _tick_bean_grinders(self) -> None:
+        if not self._bean_grinders or (self.steps_executed % 6 != 0):
+            return
+        stage = self.scene.world.stage
+        from pxr import UsdShade
+        for gr in self._bean_grinders:
+            gx, gy, gz = gr["hopper_xyz"]
+            n_in = 0
+            for bp in gr["bean_prims"]:
+                try:
+                    pos, _ = bp.get_world_pose()
+                    r = float(np.hypot(float(pos[0]) - gx, float(pos[1]) - gy))
+                    if r <= 0.062 and (gz - 0.130) <= float(pos[2]) <= (gz + 0.090):
+                        n_in += 1
+                except Exception:
+                    continue
+            if n_in > gr["max_in_grinder"]:
+                gr["max_in_grinder"] = n_in
+            if gr["state"] == "WAIT" and n_in >= gr["trigger_beans"]:
+                gr["state"] = "GRINDING"
+                gr["triggered_step"] = self.steps_executed
+                ring_pr = stage.GetPrimAtPath(gr["ring_path"]) if gr["ring_path"] else None
+                mat_gold = stage.GetPrimAtPath("/World/Looks/V6_GrinderLedGold")
+                if ring_pr and ring_pr.IsValid() and mat_gold and mat_gold.IsValid():
+                    UsdShade.MaterialBindingAPI.Apply(ring_pr).Bind(
+                        UsdShade.Material(mat_gold), bindingStrength=UsdShade.Tokens.strongerThanDescendants
+                    )
+                self.controller_logs.append(
+                    f"[GRINDER_LIVE] step={self.steps_executed} state=GRINDING beans_in_hopper={n_in}/{len(gr['bean_prims'])}"
+                )
+            elif gr["state"] == "GRINDING":
+                elapsed = self.steps_executed - gr["triggered_step"]
+                # Hold 48 ticks (0.4 s) so beans are clearly visible in transparent hopper, then open burr shutter!
+                if elapsed >= 48 and gr["open_progress"] < 1.0 and gr["shutter_closed_xyz"] is not None:
+                    gr["open_progress"] = min(1.0, gr["open_progress"] + 0.12)
+                    sp = stage.GetPrimAtPath(gr["shutter_path"])
+                    if sp and sp.IsValid():
+                        ta = sp.GetAttribute("xformOp:translate")
+                        if ta and ta.IsValid():
+                            sx, sy, sz = gr["shutter_closed_xyz"]
+                            ta.Set(Gf.Vec3d(sx, sy + 0.095 * gr["open_progress"], sz))
+                if elapsed >= 180:
+                    gr["state"] = "READY"
+                    ring_pr = stage.GetPrimAtPath(gr["ring_path"]) if gr["ring_path"] else None
+                    mat_grn = stage.GetPrimAtPath("/World/Looks/V6_GrinderLedGreen")
+                    if ring_pr and ring_pr.IsValid() and mat_grn and mat_grn.IsValid():
+                        UsdShade.MaterialBindingAPI.Apply(ring_pr).Bind(
+                            UsdShade.Material(mat_grn), bindingStrength=UsdShade.Tokens.strongerThanDescendants
+                        )
+                    self.controller_logs.append(
+                        f"[GRINDER_LIVE] step={self.steps_executed} state=BREW_READY max_beans_ground={gr['max_in_grinder']}/{len(gr['bean_prims'])}"
+                    )
+
+    def _init_closeup_camera(self) -> None:
+        if self.render_camera is None:
+            return
+        stage = self.scene.world.stage
+        cam_path = "/World/BarCloseupCam"
+        if not stage.GetPrimAtPath(cam_path).IsValid():
+            return
+        try:
+            from omni.isaac.sensor import Camera
+
+            cam = Camera(prim_path=cam_path, resolution=(640, 360))
+            cam.initialize()
+            self._closeup_camera = cam
+        except Exception:
+            self._closeup_camera = None
+
+    def _compose_pip_frame(self, overview_rgb: NDArray[Any]) -> NDArray[Any]:
+        if self._closeup_camera is None:
+            return overview_rgb
+        close_rgb = self._extract_camera_rgb(self._closeup_camera)
+        if close_rgb is None:
+            return overview_rgb
+        out = overview_rgb.copy()
+        oh, ow = out.shape[:2]
+        pw, ph = min(440, ow // 3 + 20), min(248, oh // 3 + 12)
+        pip = self._resize_rgb_wh(close_rgb, (pw, ph))
+        pad = 14
+        y0, x0 = pad, ow - pw - pad
+        # Crisp Starbucks green border around PiP
+        out[max(0, y0 - 3):min(oh, y0 + ph + 3), max(0, x0 - 3):min(ow, x0 + pw + 3)] = (0, 112, 74)
+        out[y0:y0 + ph, x0:x0 + pw] = pip
+        return out
+
     def _step_one_tick(self) -> None:
         if self.steps_executed + 1 > self.max_steps:
             raise ContractValidationError(f"Controller exceeded max_steps={self.max_steps}")
-        self._apply_robot_targets()
-        need_render_step = self.render_camera is not None and (
-            self.mode == "trajectory_synthesis" and self.steps_executed % 8 == 0
-        )
-        self.scene.world.step(render=need_render_step)
-        self.steps_executed += 1
+        tick_idx = self.steps_executed
 
         if self.mode == "trajectory_synthesis":
-            self._traj_proprio.append(self._cur_16dof().astype(np.float32))
-            self._traj_action.append(self._target_16dof.astype(np.float32).copy())
-            self._traj_base_target.append(np.asarray(self.emb.target_base_pose, dtype=np.float32).copy())
+            q_now = self._cur_16dof().astype(np.float32)
+            a_cmd = self._target_16dof.astype(np.float32).copy()
+            base_cmd = (
+                np.zeros(3, dtype=np.float32)
+                if self.embodiment.base_locked
+                else np.asarray(self.emb.target_base_pose, dtype=np.float32).copy()
+            )
+            self._traj_proprio.append(q_now)
+            self._traj_action.append(a_cmd)
+            self._traj_base_target.append(base_cmd)
             self._traj_torso_lift.append(float(self._target_lift))
-            self._traj_timestamps.append(float(self.steps_executed * self.physics_dt))
-            if self.render_camera is not None and (self.steps_executed % 8 == 0):
-                frame = self._grab_camera_rgb(accum_renders=1)
-                if frame is not None:
-                    self._traj_rgb_frames.append(frame)
-                    self._video_frames.append(frame)
+            self._traj_timestamps.append(float(tick_idx * self.physics_dt))
+            self._traj_state_ee_pose.append(self._fk_ee_pose_14d(q_now))
+            self._traj_action_ee_pose.append(self._fk_ee_pose_14d(a_cmd))
 
+            if (self.render_camera is not None or self.sensor_cameras) and (
+                tick_idx % self.camera_stride == 0
+            ):
+                self._sync_pbd_visual_instancers()
+                self.scene.world.render()
+                if self.sensor_cameras:
+                    captured: dict[str, NDArray[Any]] = {}
+                    for cam_name, cam_obj in self.sensor_cameras.items():
+                        rgb = self._extract_camera_rgb(cam_obj)
+                        if rgb is not None:
+                            captured[cam_name] = self._resize_rgb_wh(rgb, (640, 480))
+                    if len(captured) == len(self.sensor_cameras):
+                        self._traj_camera_step_indices.append(tick_idx)
+                        for cam_name, frame_rgb in captured.items():
+                            self._traj_sensor_frames[cam_name].append(frame_rgb)
+                if self.render_camera is not None and (
+                    tick_idx % max(8, self.camera_stride * 2) == 0
+                ):
+                    overview_frame = self._extract_camera_rgb(self.render_camera)
+                    if overview_frame is not None:
+                        overview_frame = self._compose_pip_frame(overview_frame)
+                        self._traj_rgb_frames.append(overview_frame)
+                        self._video_frames.append(overview_frame)
+
+        self._apply_robot_targets()
+        self._tick_pbd_dispensers()
+        self.scene.world.step(render=False)
+        self.steps_executed += 1
         self._evaluate_metrics_tick(force=False)
 
     def move_to_pose(
@@ -1290,7 +2062,8 @@ class IsaacGenManipSimBackend:
             and final_score >= 0.9999
             and self._traj_proprio
         ):
-            ep_dir = self.output_root / "episodes" / f"{self.brief.package_id}_{self.job_id}"
+            ep_folder = self.episode_id or f"{self.brief.package_id}_{self.job_id}"
+            ep_dir = self.output_root / "episodes" / ep_folder
             ep_dir.mkdir(parents=True, exist_ok=True)
             npz_path = ep_dir / "episode_trajectory.npz"
             save_dict: dict[str, Any] = {
@@ -1299,7 +2072,16 @@ class IsaacGenManipSimBackend:
                 "base_target": np.stack(self._traj_base_target, axis=0),
                 "torso_lift": np.asarray(self._traj_torso_lift, dtype=np.float32).reshape(-1, 1),
                 "timestamps_s": np.asarray(self._traj_timestamps, dtype=np.float64),
+                "state_ee_pose": np.stack(self._traj_state_ee_pose, axis=0),
+                "action_ee_pose": np.stack(self._traj_action_ee_pose, axis=0),
             }
+            if self._traj_camera_step_indices:
+                save_dict["camera_step_indices"] = np.asarray(
+                    self._traj_camera_step_indices, dtype=np.int64
+                )
+            for cam_name, cam_frames in self._traj_sensor_frames.items():
+                if cam_frames:
+                    save_dict[cam_name] = np.stack(cam_frames, axis=0)
             if self._traj_rgb_frames:
                 save_dict["rgb_head"] = np.stack(self._traj_rgb_frames, axis=0)
             np.savez_compressed(npz_path, **save_dict)
@@ -1336,6 +2118,9 @@ class IsaacGenManipSimBackend:
                 if dof.dof_index < len(vals)
             }
 
+        pbd_final = [
+            evaluate_scene_pbd_containment(self.scene, spec) for spec in getattr(self, "_pbd_goal_specs", [])
+        ]
         summary = {
             "backend": "isaac_genmanip_41",
             "stage_scores": list(stage_scores),
@@ -1344,6 +2129,8 @@ class IsaacGenManipSimBackend:
             "blocking_stage": blocking_stage,
             "objects_final": end_objects,
             "articulation_joints_final": end_joints,
+            "pbd_containment_t0": list(getattr(self, "_pbd_containment_t0", [])),
+            "pbd_containment_final": pbd_final,
             "controller_logs": list(self.controller_logs[-40:]),
         }
         return media_refs, artifact_relpath, summary

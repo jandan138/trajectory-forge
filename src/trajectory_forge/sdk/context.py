@@ -104,6 +104,13 @@ class SimBackendProtocol(Protocol):
     def live_stage_scores(self) -> tuple[float, ...]: ...
     def live_current_score(self) -> float: ...
     def live_contacts_summary(self) -> dict[str, Any]: ...
+    def live_fluid_containment_ratio(
+        self,
+        vessel_id: str,
+        *,
+        particle_prim_path: str | None = None,
+        fallback: float = 0.0,
+    ) -> float: ...
     def ee_pose(self, chain: str) -> Pose3D: ...
     def solve_ik(
         self, chain: str, target_pose: Pose3D, *, check_collision: bool = True
@@ -233,6 +240,21 @@ class WorldAPI:
     def contacts_summary(self) -> dict[str, Any]:
         return self._backend.live_contacts_summary()
 
+    def fluid_containment_ratio(
+        self,
+        vessel_id: str,
+        *,
+        particle_prim_path: str | None = None,
+        fallback: float = 0.0,
+    ) -> float:
+        return float(
+            self._backend.live_fluid_containment_ratio(
+                vessel_id,
+                particle_prim_path=particle_prim_path,
+                fallback=float(fallback),
+            )
+        )
+
 
 class KinematicsAPI:
     """Chain-agnostic kinematics, IK, Cartesian motion, and base/torso control."""
@@ -319,6 +341,13 @@ class KinematicsAPI:
         *,
         steps: int = 30,
     ) -> tuple[float, float, float]:
+        if self._embodiment.base_locked and (
+            abs(dx_m) > 1e-9 or abs(dy_m) > 1e-9 or abs(dyaw_deg) > 1e-9
+        ):
+            raise ContractValidationError(
+                f"Embodiment {self._embodiment.embodiment_id!r} has base_locked=True; "
+                "move_base_world with non-zero displacement is forbidden"
+            )
         if steps <= 0:
             raise ContractValidationError("move_base_world requires steps > 0")
         return self._backend.move_base_world(
@@ -329,6 +358,15 @@ class KinematicsAPI:
         return self._backend.base_pose_world()
 
     def set_torso_lift(self, height_m: float, *, steps: int = 20) -> float:
+        if (
+            self._embodiment.base_locked
+            and "torso" not in self._embodiment.chains
+            and abs(float(height_m) - 0.46) > 1e-4
+        ):
+            raise ContractValidationError(
+                f"Embodiment {self._embodiment.embodiment_id!r} locks torso lift at 0.46 m "
+                f"under base_locked=True (got {float(height_m):.4f} m)"
+            )
         if steps <= 0:
             raise ContractValidationError("set_torso_lift requires steps > 0")
         return self._backend.set_torso_lift(float(height_m), steps=steps)
@@ -618,6 +656,16 @@ class DryRunSimBackend:
 
     def live_contacts_summary(self) -> dict[str, Any]:
         return {"backend": "dry_run_preflight", "active_contacts": []}
+
+    def live_fluid_containment_ratio(
+        self,
+        vessel_id: str,
+        *,
+        particle_prim_path: str | None = None,
+        fallback: float = 0.0,
+    ) -> float:
+        _ = (vessel_id, particle_prim_path)
+        return float(fallback)
 
     def ee_pose(self, chain: str) -> Pose3D:
         return self._ee_poses[chain]

@@ -19,6 +19,7 @@ type:
 cli-smoke:
 	rm -f "$(SMOKE_BRIEF_OUT)"
 	PYTHONPATH=src $(CHECK_PYTHON) -m trajectory_forge.cli embodiment check configs/embodiments/lift2_r5a_bimanual.yaml
+	PYTHONPATH=src $(CHECK_PYTHON) -m trajectory_forge.cli embodiment check configs/embodiments/lift2_r5a_fixed_base_16dof.yaml
 	PYTHONPATH=src $(CHECK_PYTHON) -m trajectory_forge.cli embodiment check configs/embodiments/template_bimanual_dexterous_tactile.yaml
 	PYTHONPATH=src $(CHECK_PYTHON) -m trajectory_forge.cli controller preflight --controller examples/sample_privileged_controller.py --embodiment configs/embodiments/lift2_r5a_bimanual.yaml
 

@@ -509,6 +509,7 @@ class EmbodimentCard:
     chains: dict[str, KinematicChainSpec]
     actuator_groups: dict[str, ActuatorGroupSpec]
     sensor_streams: dict[str, SensorStreamSpec]
+    base_locked: bool = False
     schema_version: str = "trajectory-forge-embodiment-card/v0.1"
     notes: str = ""
 
@@ -541,6 +542,7 @@ class EmbodimentCard:
             "embodiment_id": self.embodiment_id,
             "runtime_robot_type": self.runtime_robot_type,
             "action_dim": self.action_dim,
+            "base_locked": self.base_locked,
             "chains": {k: v.to_dict() for k, v in self.chains.items()},
             "actuator_groups": {k: v.to_dict() for k, v in self.actuator_groups.items()},
             "sensor_streams": {k: v.to_dict() for k, v in self.sensor_streams.items()},
@@ -556,6 +558,7 @@ class EmbodimentCard:
             embodiment_id=str(data["embodiment_id"]),
             runtime_robot_type=str(data["runtime_robot_type"]),
             action_dim=int(data["action_dim"]),
+            base_locked=bool(data.get("base_locked", False)),
             chains={
                 str(k): KinematicChainSpec.from_dict(v)
                 for k, v in data.get("chains", {}).items()
@@ -798,6 +801,8 @@ class RolloutJobRequest:
     max_steps: int = 2000
     resume_from_snapshot_id: str | None = None
     render_media: bool = False
+    camera_stride: int = 4
+    capture_wrist_cameras: bool = False
     remediation_policy: RemediationPolicySpec = field(
         default_factory=RemediationPolicySpec
     )
@@ -808,6 +813,8 @@ class RolloutJobRequest:
             raise ContractValidationError(f"Unsupported execution mode: {self.mode!r}")
         if self.max_steps <= 0:
             raise ContractValidationError("RolloutJobRequest.max_steps must be > 0")
+        if self.camera_stride <= 0:
+            raise ContractValidationError("RolloutJobRequest.camera_stride must be > 0")
         if self.mode in {"full_horizon_gate", "trajectory_synthesis"}:
             if self.resume_from_snapshot_id is not None:
                 raise FirewallViolationError(
@@ -826,6 +833,8 @@ class RolloutJobRequest:
             "max_steps": self.max_steps,
             "resume_from_snapshot_id": self.resume_from_snapshot_id,
             "render_media": self.render_media,
+            "camera_stride": self.camera_stride,
+            "capture_wrist_cameras": self.capture_wrist_cameras,
             "remediation_policy": self.remediation_policy.to_dict(),
         }
 
@@ -844,6 +853,8 @@ class RolloutJobRequest:
             max_steps=int(data.get("max_steps", 2000)),
             resume_from_snapshot_id=data.get("resume_from_snapshot_id"),
             render_media=bool(data.get("render_media", False)),
+            camera_stride=int(data.get("camera_stride", 4)),
+            capture_wrist_cameras=bool(data.get("capture_wrist_cameras", False)),
             remediation_policy=RemediationPolicySpec.from_dict(
                 data.get("remediation_policy")
             ),
@@ -920,4 +931,219 @@ class RolloutJobResult:
                 SnapshotHandle.from_dict(s) for s in data.get("saved_snapshots", ())
             ),
             state_summary=dict(raw_state) if isinstance(raw_state, Mapping) else {},
+        )
+
+
+@dataclass(frozen=True)
+class BatchEpisodeSpec:
+    """Single episode seed and optional variant metadata within a warm synthesis batch."""
+
+    episode_id: str
+    seed: int
+    episode_metadata_relpath: str = ""
+    instruction_override: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.episode_id:
+            raise ContractValidationError("BatchEpisodeSpec.episode_id must be non-empty")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BatchEpisodeSpec:
+        return cls(
+            episode_id=str(data["episode_id"]),
+            seed=int(data["seed"]),
+            episode_metadata_relpath=str(data.get("episode_metadata_relpath", "")),
+            instruction_override=str(data.get("instruction_override", "")),
+        )
+
+
+@dataclass(frozen=True)
+class BatchSynthesisRequest:
+    """Warm multi-episode trajectory synthesis batch request."""
+
+    batch_id: str
+    scenario_package_ref: str
+    embodiment_id: str
+    controller_code: str
+    episodes: tuple[BatchEpisodeSpec, ...]
+    mode: str = "trajectory_synthesis"
+    max_steps: int = 2000
+    camera_stride: int = 4
+    capture_wrist_cameras: bool = True
+    render_media: bool = False
+    schema_version: str = "trajectory-forge-batch-synthesis/v0.1"
+
+    def __post_init__(self) -> None:
+        if self.mode != "trajectory_synthesis":
+            raise FirewallViolationError(
+                f"BatchSynthesisRequest requires mode='trajectory_synthesis', got {self.mode!r}"
+            )
+        if not self.episodes:
+            raise ContractValidationError("BatchSynthesisRequest.episodes must be non-empty")
+        ids = [ep.episode_id for ep in self.episodes]
+        if len(set(ids)) != len(ids):
+            raise ContractValidationError("BatchSynthesisRequest episode_id values must be unique")
+        if self.max_steps <= 0:
+            raise ContractValidationError("BatchSynthesisRequest.max_steps must be > 0")
+        if self.camera_stride <= 0:
+            raise ContractValidationError("BatchSynthesisRequest.camera_stride must be > 0")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "batch_id": self.batch_id,
+            "scenario_package_ref": self.scenario_package_ref,
+            "embodiment_id": self.embodiment_id,
+            "controller_code": self.controller_code,
+            "episodes": [ep.to_dict() for ep in self.episodes],
+            "mode": self.mode,
+            "max_steps": self.max_steps,
+            "camera_stride": self.camera_stride,
+            "capture_wrist_cameras": self.capture_wrist_cameras,
+            "render_media": self.render_media,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BatchSynthesisRequest:
+        return cls(
+            schema_version=str(
+                data.get("schema_version", "trajectory-forge-batch-synthesis/v0.1")
+            ),
+            batch_id=str(data["batch_id"]),
+            scenario_package_ref=str(data["scenario_package_ref"]),
+            embodiment_id=str(data["embodiment_id"]),
+            controller_code=str(data["controller_code"]),
+            episodes=tuple(BatchEpisodeSpec.from_dict(ep) for ep in data.get("episodes", ())),
+            mode=str(data.get("mode", "trajectory_synthesis")),
+            max_steps=int(data.get("max_steps", 2000)),
+            camera_stride=int(data.get("camera_stride", 4)),
+            capture_wrist_cameras=bool(data.get("capture_wrist_cameras", True)),
+            render_media=bool(data.get("render_media", False)),
+        )
+
+
+@dataclass(frozen=True)
+class BatchEpisodeOutcome:
+    """Firewall-checked result for one episode inside a warm synthesis batch."""
+
+    episode_id: str
+    seed: int
+    status: str
+    final_score: float
+    steps_executed: int
+    snapshots_used: int
+    firewall_verified: bool
+    trajectory_manifest: TrajectoryEpisodeManifest | None = None
+    failure_code: str = ""
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status == "succeeded":
+            if self.snapshots_used != 0 or not self.firewall_verified:
+                raise FirewallViolationError(
+                    f"Accepted episode {self.episode_id!r} failed snapshot/firewall verification"
+                )
+            if self.final_score < 0.9999:
+                raise FirewallViolationError(
+                    f"Accepted episode {self.episode_id!r} has final_score={self.final_score} < 1.0"
+                )
+            if self.trajectory_manifest is None:
+                raise FirewallViolationError(
+                    f"Accepted episode {self.episode_id!r} is missing trajectory_manifest"
+                )
+            if (
+                not self.trajectory_manifest.continuous_from_t0
+                or self.trajectory_manifest.privileged_channels_recorded
+            ):
+                raise FirewallViolationError(
+                    f"Accepted episode {self.episode_id!r} violates manifest firewall invariants"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "episode_id": self.episode_id,
+            "seed": self.seed,
+            "status": self.status,
+            "final_score": self.final_score,
+            "steps_executed": self.steps_executed,
+            "snapshots_used": self.snapshots_used,
+            "firewall_verified": self.firewall_verified,
+            "trajectory_manifest": (
+                self.trajectory_manifest.to_dict()
+                if self.trajectory_manifest is not None
+                else None
+            ),
+            "failure_code": self.failure_code,
+            "detail": self.detail,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BatchEpisodeOutcome:
+        raw_manifest = data.get("trajectory_manifest")
+        return cls(
+            episode_id=str(data["episode_id"]),
+            seed=int(data["seed"]),
+            status=str(data["status"]),
+            final_score=float(data["final_score"]),
+            steps_executed=int(data["steps_executed"]),
+            snapshots_used=int(data["snapshots_used"]),
+            firewall_verified=bool(data["firewall_verified"]),
+            trajectory_manifest=(
+                TrajectoryEpisodeManifest.from_dict(raw_manifest)
+                if isinstance(raw_manifest, Mapping)
+                else None
+            ),
+            failure_code=str(data.get("failure_code", "")),
+            detail=str(data.get("detail", "")),
+        )
+
+
+@dataclass(frozen=True)
+class BatchSynthesisReport:
+    """Summary report emitted by warm batch trajectory synthesis."""
+
+    batch_id: str
+    scenario_package_ref: str
+    embodiment_id: str
+    outcomes: tuple[BatchEpisodeOutcome, ...]
+    accepted_count: int
+    failed_count: int
+    schema_version: str = "trajectory-forge-batch-synthesis/v0.1"
+
+    def __post_init__(self) -> None:
+        actual_accepted = sum(1 for item in self.outcomes if item.status == "succeeded")
+        actual_failed = len(self.outcomes) - actual_accepted
+        if self.accepted_count != actual_accepted or self.failed_count != actual_failed:
+            raise ContractValidationError(
+                "BatchSynthesisReport counts do not match outcomes"
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "batch_id": self.batch_id,
+            "scenario_package_ref": self.scenario_package_ref,
+            "embodiment_id": self.embodiment_id,
+            "outcomes": [item.to_dict() for item in self.outcomes],
+            "accepted_count": self.accepted_count,
+            "failed_count": self.failed_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> BatchSynthesisReport:
+        return cls(
+            schema_version=str(
+                data.get("schema_version", "trajectory-forge-batch-synthesis/v0.1")
+            ),
+            batch_id=str(data["batch_id"]),
+            scenario_package_ref=str(data["scenario_package_ref"]),
+            embodiment_id=str(data["embodiment_id"]),
+            outcomes=tuple(
+                BatchEpisodeOutcome.from_dict(item) for item in data.get("outcomes", ())
+            ),
+            accepted_count=int(data["accepted_count"]),
+            failed_count=int(data["failed_count"]),
         )

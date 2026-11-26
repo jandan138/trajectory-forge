@@ -201,7 +201,11 @@ def _parse_stages(
     return tuple(stages)
 
 
-def load_genmanip_collected_package(package_dir: Path) -> ScenarioIntakeBrief:
+def load_genmanip_collected_package(
+    package_dir: Path,
+    *,
+    episode_metadata_path: Path | None = None,
+) -> ScenarioIntakeBrief:
     """Parse a scenario-forge GenManip collected package into ScenarioIntakeBrief."""
     pkg_root, manifest_path = _resolve_package_root(package_dir)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -213,10 +217,12 @@ def load_genmanip_collected_package(package_dir: Path) -> ScenarioIntakeBrief:
     entrypoints = manifest.get("entrypoints", {})
     semantic_cfg = manifest.get("semantic_contract", {})
     ep_relpath = semantic_cfg.get("path") or entrypoints.get("episode_metadata")
-    if not ep_relpath:
-        raise ContractValidationError("package_manifest.json missing episode_metadata path")
-
-    ep_path = pkg_root / str(ep_relpath)
+    if episode_metadata_path is not None:
+        ep_path = episode_metadata_path
+    else:
+        if not ep_relpath:
+            raise ContractValidationError("package_manifest.json missing episode_metadata path")
+        ep_path = pkg_root / str(ep_relpath)
     if not ep_path.exists():
         raise ContractValidationError(f"episode_metadata.json not found: {ep_path}")
     ep_doc = json.loads(ep_path.read_text(encoding="utf-8"))

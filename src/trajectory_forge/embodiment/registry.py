@@ -55,6 +55,7 @@ def load_embodiment_card(path: Path) -> EmbodimentCard:
         embodiment_id=str(root["embodiment_id"]),
         runtime_robot_type=str(root["runtime_robot_type"]),
         action_dim=int(root["action_dim"]),
+        base_locked=bool(root.get("base_locked", False)),
         chains=chains,
         actuator_groups=actuator_groups,
         sensor_streams=sensor_streams,

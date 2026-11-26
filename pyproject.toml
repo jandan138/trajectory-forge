@@ -51,6 +51,8 @@ module = [
   "scipy.*",
   "pxr",
   "pxr.*",
+  "carb",
+  "carb.*",
   "omni.*",
   "isaacsim",
   "isaacsim.*",
@@ -58,6 +60,10 @@ module = [
   "genmanip.*",
   "cv2",
   "cv2.*",
+  "lerobot",
+  "lerobot.*",
+  "pyarrow",
+  "pyarrow.*",
 ]
 ignore_missing_imports = true
 

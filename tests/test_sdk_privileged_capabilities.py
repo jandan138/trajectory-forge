@@ -138,3 +138,37 @@ def solve(ctx):
     with pytest.raises(FirewallViolationError):
         run_controller_preflight(bad_code, brief, embodiment, mode="full_horizon_gate")
 
+
+def test_fluid_containment_ratio_query_and_pure_particle_helpers() -> None:
+    from trajectory_forge.trajectory.fluid_helpers import (
+        compute_aabb_containment_ratio,
+        transform_points_local_to_world,
+    )
+
+    embodiment = load_embodiment_card(
+        REPO_ROOT / "configs" / "embodiments" / "lift2_r5a_fixed_base_16dof.yaml"
+    )
+    pkg = R3_PACKAGES / "modern_office_brother_calibrate" / "collected_package"
+    brief = load_genmanip_collected_package(pkg)
+
+    code = """
+def solve(ctx):
+    ratio = ctx.world.fluid_containment_ratio("missing_tank", fallback=0.0)
+    assert isinstance(ratio, float)
+    assert ratio == 0.0
+    ctx.step(1)
+"""
+    res = run_controller_preflight(code, brief, embodiment, mode="full_horizon_gate")
+    assert res.status == "succeeded"
+
+    pts_local = ((0.0, 0.0, 0.0), (0.01, 0.0, 0.02), (0.50, 0.50, 0.50))
+    world_pose = Pose3D(xyz=(1.0, -0.5, 0.8), wxyz=(1.0, 0.0, 0.0, 0.0))
+    pts_world = transform_points_local_to_world(pts_local, world_pose)
+    assert pts_world[0] == pytest.approx((1.0, -0.5, 0.8), abs=1e-6)
+    inside = compute_aabb_containment_ratio(
+        pts_world,
+        box_min=(0.9, -0.6, 0.7),
+        box_max=(1.1, -0.4, 0.9),
+    )
+    assert inside == pytest.approx(2.0 / 3.0, abs=1e-6)
+

@@ -37,7 +37,7 @@ Hardcoded primitives (`grasp(obj)`, `pull_drawer()`) bake in **two-finger parall
 
 ## 3. Cross-Embodiment, Dexterous Hand & Tactile Forward Compatibility
 
-While `v0.1` targets `lift2_r5a_bimanual` (16-DOF dual 6-DOF arms + dual 2-finger parallel grippers), every contract is generalized via `EmbodimentCard` (`configs/embodiments/`):
+While `v0.1` targets `lift2_r5a_bimanual` and `lift2_r5a_fixed_base_16dof` (16-DOF dual 6-DOF arms + dual 2-finger parallel grippers, with `base_locked: true` for tabletop fixed-base synthesis), every contract is generalized via `EmbodimentCard` (`configs/embodiments/`):
 
 - **No scalar gripper width**: Parallel grippers and 16-DOF+ five-finger dexterous hands both implement `ActuatorGroupSpec` (`kind`: `parallel_gripper | dexterous_hand | suction_end_effector | custom`, `control_modes`: `position | velocity | effort | impedance`, and `named_postures` such as `pre_pinch`, `tripod_dial`, `index_poke`).
 - **Extensible sensor streams**: `SensorStreamSpec` declares `proprio`, `wrench`, `tactile_summary`, `tactile_array`, `rgb`, and `depth` shapes and rates (`configs/embodiments/template_bimanual_dexterous_tactile.yaml` validates through the exact same parser as `lift2`).
@@ -47,7 +47,10 @@ While `v0.1` targets `lift2_r5a_bimanual` (16-DOF dual 6-DOF arms + dual 2-finge
 
 ## 4. `v0.1` Closed-Loop Solver, Diagnostics & `r3` Live Verification
 
-- **`PrivilegedSolverHarness` (`cli solve`)**: Orchestrates iterative controller synthesis/repair (`privileged_search`, snapshot checkpointing permitted) -> zero-snapshot continuous `t=0` gate (`full_horizon_gate`, `FirewallViolationError` on any snapshot save/restore/resume) -> sensorimotor export (`trajectory_synthesis`, writing `episode_trajectory.npz` with `privileged_channels_recorded=False`, `proprio`, `action`, `base_target`, `torso_lift`, `timestamps_s`, `rgb_head`).
+- **`PrivilegedSolverHarness` (`cli solve`)**: Orchestrates iterative controller synthesis/repair (`privileged_search`, snapshot checkpointing permitted) -> zero-snapshot continuous `t=0` gate (`full_horizon_gate`, `FirewallViolationError` on any snapshot save/restore/resume) -> sensorimotor export (`trajectory_synthesis`, writing `episode_trajectory.npz` with `privileged_channels_recorded=False`, `proprio`, `action`, `base_target`, `torso_lift`, `timestamps_s`, `state_ee_pose`, `action_ee_pose`, `camera_step_indices`, `rgb_overlook`, `rgb_left_wrist`, `rgb_right_wrist`, `rgb_head`).
+- **Warm Batch Synthesis & LeRobot v2.1 Export**:
+  - `cli batch-synthesize` executes `BatchSynthesisRequest` across many seeds/randomized layouts inside one persistent simulator worker (`batch_runner_entry.py`) with synchronized `15 Hz` (`camera_stride=4`) 3-camera RGB capture.
+  - `cli export-lerobot` validates firewall invariants via pure-Python `trajectory_forge.trajectory.lerobot_converter` (exact bijection between interleaved 16-DoF commands and split `[arm_12, gripper_4, base_3]` streams) and invokes the isolated `adapters/lerobot_v2` writer to produce unified `LeRobot v2.1` datasets (carrying both split keys and flat `observation.state`/`action` keys).
 - **Executor Backends**: Supports `dry-run`, `isaac-genmanip`, `ssh-isaac-genmanip` (`SSHIsaacGenManipExecutor` running real Isaac Sim 4.1 + `GenManip` + CUDA CuRobo remotely over SSH), and `http-worker`.
 - **Automated `SolvabilityDiagnostics`**: Distinguishes physical USD/asset blockers from controller errors (`UPSTREAM_USD_OVERDAMPED_REVOLUTE_JOINT` when `drive:angular:physics:damping > 2.0 N*m*s/deg` causes >114.6 N*m*s/rad PhysX torque; `UPSTREAM_OBJECT_EXCEEDS_GRIPPER_APERTURE` when an ungraspable object's horizontal footprint exceeds `0.088 m`).
 

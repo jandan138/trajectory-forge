@@ -40,14 +40,17 @@ HOSE_3WAY_ROOT = _REPO_ROOT / "external_artifacts" / "hose_softbody_v10_3way"
 
 
 def _load_fonts() -> tuple[Any, Any, Any, Any]:
-    try:
-        f_hdr = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 22)
-        f_sub = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 15)
-        f_badge = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 16)
-        f_mono = ImageFont.truetype(r"C:\Windows\Fonts\consolab.ttf", 14)
-    except Exception:
-        f_hdr = f_sub = f_badge = f_mono = ImageFont.load_default()
-    return f_hdr, f_sub, f_badge, f_mono
+    cands = (r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc", "/mnt/data/liuhangxu/garment/blender-4.5.2-linux-x64/4.5/datafiles/fonts/Noto Sans CJK Regular.woff2", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+    mcands = (r"C:\Windows\Fonts\consolab.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", *cands)
+    def _pick(sz: int, cs: tuple[str, ...]) -> Any:
+        for fp in cs:
+            try:
+                if Path(fp).is_file():
+                    return ImageFont.truetype(fp, sz)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+    return _pick(22, cands), _pick(15, cands), _pick(16, cands), _pick(14, mcands)
 
 
 def _find_ffmpeg() -> str:
@@ -213,7 +216,7 @@ def build_master_html(
     route_a_dir: Path = V09_ROOT / "d6der_full_s01_s12_video",
     route_b_dir: Path = V09_ROOT / "fem_full_s01_s12_video",
     hose_3way_dir: Path = HOSE_3WAY_ROOT,
-    out_html: Path = DEFAULT_REPORTS_DIR / "distillation_v10_all_schemes_master_showcase_20261125.html",
+    out_html: Path = DEFAULT_REPORTS_DIR / "distillation_v10_1_coaxial_barb_master_showcase_20261126.html",
 ) -> dict[str, Any]:
     """Build 100% single-file offline HTML embedding full native 1080p MP4 videos across all schemes."""
     res_base = _load_json(baseline_dir / "cold_start_result.json")
@@ -237,8 +240,21 @@ def build_master_html(
 
     t3 = sum_3way.get("trials", {})
 
+    def _bf_fmt(s10_d: dict[str, Any], hkey: str) -> str:
+        bf = s10_d.get("barb_fit_s10", {}).get(hkey, {})
+        if not bf:
+            return "N/A"
+        s_mm = float(bf.get("axial_mouth_s_mm", 0.0))
+        r_mm = float(bf.get("radial_off_mm", 0.0))
+        hp = float(bf.get("cuff_hoop_strain_pct", 0.0))
+        cov_mm = max(0.0, 36.0 - s_mm)
+        return f"包覆 {cov_mm:.1f} mm (口 s={s_mm:.1f}mm) · 偏心 {r_mm:.2f} mm · 环向 +{hp:.1f}%"
+
+    wall_base = float(res_base.get("cold_start_process", {}).get("wall_time_s", 0.0))
+
     def _t3m(key: str) -> dict[str, Any]:
-        return t3.get(key, {}).get("metrics", {})
+        row = t3.get(key, {})
+        return row.get("metrics", row) if isinstance(row, dict) else {}
 
     m3_base = _t3m("baseline_bead_chain")
     m3_a = _t3m("route_a_d6_der")
@@ -481,6 +497,18 @@ def build_master_html(
           <td>{sbf.get("thermometer_bulb_flush_err_mm", 0):.3f} mm / {sbf.get("drip_in_mouth_xy_err_mm", 0):.2f} mm</td>
         </tr>
         <tr>
+          <td><strong>v10.1 进水口 3 橄榄同轴包覆（深度 / 偏心 / 环向）</strong></td>
+          <td>{_bf_fmt(sb, "inlet")}</td>
+          <td><strong>{_bf_fmt(sa, "inlet")}</strong></td>
+          <td><strong>{_bf_fmt(sbf, "inlet")}</strong></td>
+        </tr>
+        <tr>
+          <td><strong>v10.1 出水口 3 橄榄同轴包覆（深度 / 偏心 / 环向）</strong></td>
+          <td>{_bf_fmt(sb, "outlet")}</td>
+          <td><strong>{_bf_fmt(sa, "outlet")}</strong></td>
+          <td><strong>{_bf_fmt(sbf, "outlet")}</strong></td>
+        </tr>
+        <tr>
           <td><strong>软管台面穿透 / 全流程耗时</strong></td>
           <td>实拍 ~4 min (原速)</td>
           <td>{sb.get("max_hose_bench_penetration_mm", 0):.2f} mm · {wall_base:.0f} s (4725 帧)</td>
@@ -572,27 +600,27 @@ def build_master_html(
       <tbody>
         <tr>
           <td><strong>Exp-1 140mm 悬臂下垂 / 拨动回弹率</strong></td>
-          <td>{m3_base.get("exp1_cantilever", {}).get("rest_sag_mm", 0):.2f} mm / {m3_base.get("exp1_cantilever", {}).get("rebound_ratio_pct", 0):.1f}%</td>
-          <td><strong>{m3_a.get("exp1_cantilever", {}).get("rest_sag_mm", 0):.2f} mm / {m3_a.get("exp1_cantilever", {}).get("rebound_ratio_pct", 0):.1f}%</strong></td>
-          <td><strong>{m3_b.get("exp1_cantilever", {}).get("rest_sag_mm", 0):.2f} mm / {m3_b.get("exp1_cantilever", {}).get("rebound_ratio_pct", 0):.1f}%</strong></td>
+          <td>{m3_base.get("exp1_cantilever", {}).get("sag_eq_mm", 0):.2f} mm / {m3_base.get("exp1_cantilever", {}).get("elastic_rebound_pct", 0):.1f}%</td>
+          <td><strong>{m3_a.get("exp1_cantilever", {}).get("sag_eq_mm", 0):.2f} mm / {m3_a.get("exp1_cantilever", {}).get("elastic_rebound_pct", 0):.1f}%</strong></td>
+          <td><strong>{m3_b.get("exp1_cantilever", {}).get("sag_eq_mm", 0):.2f} mm / {m3_b.get("exp1_cantilever", {}).get("elastic_rebound_pct", 0):.1f}%</strong></td>
         </tr>
         <tr>
           <td><strong>Exp-2 90° 轴向扭转传递（远端扭角 / 传递率）</strong></td>
-          <td>{m3_base.get("exp2_torsion", {}).get("distal_twist_deg", 0):.2f}° ({m3_base.get("exp2_torsion", {}).get("twist_transmission_pct", 0):.1f}%)</td>
-          <td><strong>{m3_a.get("exp2_torsion", {}).get("distal_twist_deg", 0):.2f}° ({m3_a.get("exp2_torsion", {}).get("twist_transmission_pct", 0):.1f}%)</strong></td>
-          <td><strong>{m3_b.get("exp2_torsion", {}).get("distal_twist_deg", 0):.2f}° ({m3_b.get("exp2_torsion", {}).get("twist_transmission_pct", 0):.1f}%)</strong></td>
+          <td>{m3_base.get("exp2_torsion_90deg", {}).get("tip_twist_steady_deg", 0):.2f}° ({m3_base.get("exp2_torsion_90deg", {}).get("transmission_ratio_pct", 0):.1f}%)</td>
+          <td><strong>{m3_a.get("exp2_torsion_90deg", {}).get("tip_twist_steady_deg", 0):.2f}° ({m3_a.get("exp2_torsion_90deg", {}).get("transmission_ratio_pct", 0):.1f}%)</strong></td>
+          <td><strong>{m3_b.get("exp2_torsion_90deg", {}).get("tip_twist_steady_deg", 0):.2f}° ({m3_b.get("exp2_torsion_90deg", {}).get("transmission_ratio_pct", 0):.1f}%)</strong></td>
         </tr>
         <tr>
           <td><strong>Exp-3 夹爪推入深度 / 脱手垂悬误差 / 轴向拔脱</strong></td>
-          <td>自锁={m3_base.get("exp3_barb_fit", {}).get("hands_off_self_lock", False)}（掉落 {m3_base.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.1f} mm）</td>
-          <td>推入 {m3_a.get("exp3_barb_fit", {}).get("insertion_depth_mm", 0):.2f} mm · 垂悬 {m3_a.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.2f} mm · 拔脱={m3_a.get("exp3_barb_fit", {}).get("pull_off_succeeded", False)}</td>
-          <td>推入 {m3_b.get("exp3_barb_fit", {}).get("insertion_depth_mm", 0):.2f} mm · 垂悬 {m3_b.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.2f} mm · <strong>环向膨胀 {m3_b.get("exp3_barb_fit", {}).get("hoop_expansion_pct", 0):.1f}%</strong></td>
+          <td>自锁={m3_base.get("exp3_barb_fit", {}).get("self_lock_hang_passed", False)}（掉落 {m3_base.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.1f} mm）</td>
+          <td>推入 {m3_a.get("exp3_barb_fit", {}).get("insertion_depth_hang_mm", 0):.2f} mm · 垂悬 {m3_a.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.2f} mm · 拔脱={m3_a.get("exp3_barb_fit", {}).get("pull_off_passed", False)}</td>
+          <td>推入 {m3_b.get("exp3_barb_fit", {}).get("insertion_depth_hang_mm", 0):.2f} mm · 垂悬 {m3_b.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.2f} mm · <strong>环向膨胀 {m3_b.get("exp3_barb_fit", {}).get("peak_fem_hoop_strain_pct", 0):.1f}%</strong></td>
         </tr>
         <tr>
           <td><strong>反事实 ①：μ = 0 零摩擦证伪</strong></td>
           <td>直接掉落</td>
-          <td>4 瓣刚体微弹簧越过宝塔肩卡扣锁止（self_lock={m3_a0.get("exp3_barb_fit", {}).get("hands_off_self_lock", False)}）</td>
-          <td><strong>真实连续介质滑脱证伪：self_lock={m3_b0.get("exp3_barb_fit", {}).get("hands_off_self_lock", False)}（滑落 {m3_b0.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.1f} mm）</strong></td>
+          <td><strong>真实摩擦滑脱证伪：self_lock={m3_a0.get("exp3_barb_fit", {}).get("self_lock_hang_passed", False)}（滑落 {m3_a0.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.1f} mm）</strong></td>
+          <td><strong>真实连续介质滑脱证伪：self_lock={m3_b0.get("exp3_barb_fit", {}).get("self_lock_hang_passed", False)}（滑落 {m3_b0.get("exp3_barb_fit", {}).get("hang_z_err_mm", 0):.1f} mm）</strong></td>
         </tr>
         <tr>
           <td><strong>反事实 ②：『上进下出』水路接反检出</strong></td>
@@ -652,6 +680,7 @@ def build_master_html(
 </body>
 </html>
 """
+    out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(html_doc, encoding="utf-8")
     return {
         "out_html": str(out_html),

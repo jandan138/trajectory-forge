@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,10 +26,24 @@ from PIL import Image, ImageDraw, ImageFont
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BV_CLIP = Path(
-    r"I:\cpfs\shared\simulation\zhuzihou\dev\embodied-eval-os\external_artifacts\distillation_v06_m4\bilibili_ref_sop_clip.mp4"
+    os.environ.get("DISTILL_BV_CLIP", "/root/hose_v10_1_work/bilibili_ref_sop_clip.mp4") if not Path(r"I:\cpfs\shared\simulation\zhuzihou\dev\embodied-eval-os\external_artifacts\distillation_v06_m4\bilibili_ref_sop_clip.mp4").is_file() else r"I:\cpfs\shared\simulation\zhuzihou\dev\embodied-eval-os\external_artifacts\distillation_v06_m4\bilibili_ref_sop_clip.mp4"
 )
 DEFAULT_V09_NOM_DIR = _REPO_ROOT / "external_artifacts" / "distillation_v09_oneshot" / "nominal_s01_s12"
 DEFAULT_REPORTS_DIR = _REPO_ROOT / "external_artifacts" / "reports"
+
+def _pick_font(size: int, mono: bool = False) -> Any:
+    cands = (
+        [r"C:\Windows\Fonts\consolab.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc", "/mnt/data/liuhangxu/garment/blender-4.5.2-linux-x64/4.5/datafiles/fonts/Noto Sans CJK Regular.woff2", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+        if mono else [r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc", "/mnt/data/liuhangxu/garment/blender-4.5.2-linux-x64/4.5/datafiles/fonts/Noto Sans CJK Regular.woff2", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+    )
+    for fp in cands:
+        try:
+            if Path(fp).is_file():
+                return ImageFont.truetype(fp, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
 FFMPEG_DEFAULT = Path(r"G:\my_program\ffmpeg-2023-06-04-git-b1c3d81e71-full_build\bin\ffmpeg.exe")
 
 
@@ -130,8 +145,8 @@ def _prerender_telemetry_bg(tel: Any, panel_w: int = 744, panel_h: int = 424) ->
     im = Image.new("RGB", (panel_w, panel_h), (11, 18, 32))
     dr = ImageDraw.Draw(im)
     try:
-        f_title = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 16)
-        f_lbl = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 12)
+        f_title = _pick_font(16)
+        f_lbl = _pick_font(12)
     except Exception:
         f_title = f_lbl = ImageFont.load_default()
 
@@ -206,8 +221,8 @@ def build_frame_aligned_videos(
     rd_m04 = _SequentialFrameReader(m04_drip_mp4, cache_size=120)
 
     try:
-        f_hdr = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 22)
-        f_sub = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 15)
+        f_hdr = _pick_font(22)
+        f_sub = _pick_font(15)
         f_bdg = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 14)
         f_sml = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 13)
     except Exception:

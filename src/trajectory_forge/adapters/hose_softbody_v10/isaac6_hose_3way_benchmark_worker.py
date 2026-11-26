@@ -31,12 +31,17 @@ from typing import Any, Sequence
 
 import numpy as np
 
-os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", r"I:\isaacsim-data\6.0.1")
-os.environ.setdefault("TEMP", r"I:\isaacsim-data\6.0.1\temp")
-os.environ.setdefault("TMP", r"I:\isaacsim-data\6.0.1\temp")
+if os.name == "nt":
+    os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", r"I:\isaacsim-data\6.0.1")
+    os.environ.setdefault("TEMP", r"I:\isaacsim-data\6.0.1\temp")
+    os.environ.setdefault("TMP", r"I:\isaacsim-data\6.0.1\temp")
+else:
+    _isaac_root = os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", "/root/hose_v10_1_work/isaac60_data")
+    os.environ.setdefault("TMPDIR", "/root/hose_v10_1_work/isaac60_tmp")
+    Path(_isaac_root, "logs").mkdir(parents=True, exist_ok=True)
 
 _SRC_ROOT = str(Path(__file__).resolve().parents[3])
-_CA_ROOT = r"I:\cpfs\shared\simulation\zhuzihou\dev\ConvertAsset"
+_CA_ROOT = str(Path(__file__).resolve().parents[5] / "ConvertAsset")
 for _p in (_SRC_ROOT, _CA_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -238,31 +243,32 @@ def _build_rod_links(
 ) -> dict[str, Any]:
     """Build either Baseline SphericalJoint Bead-Chain or Route A Featherstone Articulated D6-DER rod."""
     scope_prim = UsdGeom.Scope.Define(stage, scope_path).GetPrim()
-    pts = np.linspace(p0, p1, n_links + 1)
-    ds = float(np.linalg.norm(p1 - p0)) / float(n_links)
+    if add_cuff_micro_springs:
+        # v10.1 Coaxial 32mm 2-Ring Micro-Spring Cuff Collar (link_00) + Flexible D6-DER Body (links 1..n-1)
+        # Matches V09 Route A architecture: zero Euler column buckling, straddles all 3 glass olives coaxially!
+        cuff_len = 0.036
+        u_dir = (p1 - p0) / max(float(np.linalg.norm(p1 - p0)), 1e-12)
+        p_cuff_end = p0 + cuff_len * u_dir
+        body_pts = np.linspace(p_cuff_end, p1, n_links)
+        pts = np.vstack([p0[None, :], body_pts])
+    else:
+        pts = np.linspace(p0, p1, n_links + 1)
+    link_lens = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    ds = float(np.mean(link_lens))
+    is_d6 = (method == "route_a_d6_der")
+
     link_prims: list[str] = []
     link_xfs: list[Any] = []
     cuff_pad_info: list[dict[str, Any]] = []
     motor_drv: Any = None
 
-    is_d6 = (method == "route_a_d6_der")
-    use_art = bool(is_d6 and not add_cuff_micro_springs)
-    if use_art:
-        # Exact O(N) Featherstone Reduced-Coordinate Articulation for Exp-1 & Exp-2 D6-DER cantilever & torsion!
-        UsdPhysics.ArticulationRootAPI.Apply(scope_prim)
-        px_art = PhysxSchema.PhysxArticulationAPI.Apply(scope_prim)
-        px_art.CreateSolverPositionIterationCountAttr().Set(32)
-        px_art.CreateSolverVelocityIterationCountAttr().Set(8)
-
-    # Exact continuum-to-USD angular drive stiffness (N*m / deg) calibrated via 6-point Featherstone sweep
-    # to match Route B GPU FEM (~55 mm cantilever sag, >95% elastic rebound, ~89 deg 90-deg twist transmission!)
-    deg2rad = math.pi / 180.0
-    k_bend_usd = (rod_spec.bend_stiffness_nm_per_rad * deg2rad * 18.0) if use_art else (rod_spec.bend_stiffness_nm_per_rad * 4.2)
-    c_bend_usd = k_bend_usd * (0.14 if use_art else 0.45)
-    k_twist_usd = (rod_spec.twist_stiffness_nm_per_rad * deg2rad * 42.0) if use_art else (rod_spec.twist_stiffness_nm_per_rad * 12.0)
-    c_twist_usd = k_twist_usd * (0.14 if use_art else 0.45)
+    k_bend_usd = float(rod_spec.bend_stiffness_nm_per_rad) * (math.pi / 180.0)
+    c_bend_usd = float(rod_spec.bend_damping_nms_per_rad) * (math.pi / 180.0)
+    k_twist_usd = float(rod_spec.twist_stiffness_nm_per_rad) * (math.pi / 180.0)
+    c_twist_usd = float(rod_spec.twist_damping_nms_per_rad) * (math.pi / 180.0)
 
     for i in range(n_links):
+        li_len = float(link_lens[i])
         mid = 0.5 * (pts[i] + pts[i + 1])
         lp = f"{scope_path}/link_{i:02d}"
         xf = UsdGeom.Xform.Define(stage, lp)
@@ -270,85 +276,85 @@ def _build_rod_links(
         xf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(1.0, 0.0, 0.0, 0.0))
         rb = UsdPhysics.RigidBodyAPI.Apply(xf.GetPrim())
         rb.CreateKinematicEnabledAttr().Set(False)
-        m_api = UsdPhysics.MassAPI.Apply(xf.GetPrim())
-        m_api.CreateMassAttr().Set(float(rod_spec.link_mass_kg))
-        if use_art:
-            m_api.CreateDiagonalInertiaAttr().Set(Gf.Vec3f(1.2e-6, 1.8e-6, 1.8e-6))
-        pxrb = PhysxSchema.PhysxRigidBodyAPI.Apply(xf.GetPrim())
-        pxrb.CreateLinearDampingAttr().Set(1.6 if not is_d6 else 0.55)
-        pxrb.CreateAngularDampingAttr().Set(2.0 if not is_d6 else 0.45)
-        pxrb.CreateSolverPositionIterationCountAttr().Set(32)
-        pxrb.CreateSolverVelocityIterationCountAttr().Set(8)
+        link_mass = float(rod_spec.link_mass_kg) * (li_len / max(ds, 1e-6))
+        UsdPhysics.MassAPI.Apply(xf.GetPrim()).CreateMassAttr().Set(link_mass)
+        px_rb = PhysxSchema.PhysxRigidBodyAPI.Apply(xf.GetPrim())
+        px_rb.CreateLinearDampingAttr().Set(float(rod_spec.linear_damping))
+        px_rb.CreateAngularDampingAttr().Set(float(rod_spec.angular_damping))
+        px_rb.CreateSolverPositionIterationCountAttr().Set(32)
+        px_rb.CreateSolverVelocityIterationCountAttr().Set(4)
 
-        # Link collider: for link 0 with Method-B barb cuff, leave inner bore open & put 4 radial micro-spring pads!
         if add_cuff_micro_springs and i == 0:
-            for k_ang in range(4):
-                ang = k_ang * 0.5 * math.pi + 0.25 * math.pi
-                uy, uz = math.cos(ang), math.sin(ang)
-                pad_p = f"{scope_path}/cuff_pad_{k_ang}"
-                pxf = UsdGeom.Xform.Define(stage, pad_p)
-                r_rest_center = 0.0031 + 0.0020  # inner edge at r = 3.1 mm < 4.0 mm glass barb bead!
-                p_world = mid + np.array([0.0, r_rest_center * uy, r_rest_center * uz])
-                pxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, p_world)))
-                pxf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(1.0, 0.0, 0.0, 0.0))
-                prb = UsdPhysics.RigidBodyAPI.Apply(pxf.GetPrim())
-                prb.CreateKinematicEnabledAttr().Set(False)
-                UsdPhysics.MassAPI.Apply(pxf.GetPrim()).CreateMassAttr().Set(0.0018)
-                ppx = PhysxSchema.PhysxRigidBodyAPI.Apply(pxf.GetPrim())
-                ppx.CreateLinearDampingAttr().Set(4.0)
-                ppx.CreateAngularDampingAttr().Set(4.0)
-                sp = UsdGeom.Sphere.Define(stage, f"{pad_p}/Sph")
-                sp.CreateRadiusAttr(0.0020)
-                UsdGeom.Imageable(sp).MakeInvisible()
-                UsdPhysics.CollisionAPI.Apply(sp.GetPrim())
-                _set_col_offsets(PhysxSchema, sp.GetPrim(), rest=0.00005, contact=0.0005)
-                physicsUtils.add_physics_material_to_prim(stage, sp.GetPrim(), cuff_mat)
-                pj = UsdPhysics.PrismaticJoint.Define(stage, f"{scope_path}/cuff_spring_{k_ang}")
-                pj.CreateAxisAttr("X")
-                pj.CreateBody0Rel().SetTargets([Sdf.Path(lp)])
-                pj.CreateBody1Rel().SetTargets([Sdf.Path(pad_p)])
-                q_rad = Gf.Rotation(Gf.Vec3d(1, 0, 0), Gf.Vec3d(0.0, uy, uz)).GetQuat()
-                qf = Gf.Quatf(float(q_rad.GetReal()), Gf.Vec3f(*[float(v) for v in q_rad.GetImaginary()]))
-                pj.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, float(r_rest_center * uy), float(r_rest_center * uz)))
-                pj.CreateLocalRot0Attr().Set(qf)
-                pj.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-                pj.CreateLocalRot1Attr().Set(qf)
-                pj.CreateLowerLimitAttr().Set(-0.0005)
-                pj.CreateUpperLimitAttr().Set(0.0045)
-                drv = UsdPhysics.DriveAPI.Apply(pj.GetPrim(), "linear")
-                drv.CreateTypeAttr("force")
-                drv.CreateStiffnessAttr().Set(1550.0)
-                drv.CreateDampingAttr().Set(22.0)
-                drv.CreateMaxForceAttr().Set(12.0)
-                drv.CreateTargetPositionAttr().Set(0.0)
-                cuff_pad_info.append(
-                    {
-                        "pad_prim": pad_p,
-                        "host_prim": lp,
-                        "p_loc": np.array([0.0, r_rest_center * uy, r_rest_center * uz], dtype=np.float64),
-                        "stiffness": 1550.0,
-                        "max_force": 12.0,
-                    }
-                )
-        elif add_cuff_micro_springs and i == 1:
-            # Link 1 stays hollow around the barb tip with 4 outer grip staves so gripper can push link 1..2 while barb enters link 0..1!
+            # 1) 4 hollow outer grip staves along the 32mm sleeve (inner 5.65mm > 5.4mm olive, outer 6.45mm for gripper pinch!)
             for k_ang in range(4):
                 ang = k_ang * 0.5 * math.pi
                 uy, uz = math.cos(ang), math.sin(ang)
                 st = UsdGeom.Cube.Define(stage, f"{lp}/OuterWall_{k_ang}")
                 st.CreateSizeAttr(1.0)
                 sxf = UsdGeom.Xformable(st.GetPrim())
-                sxf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0046 * uy, 0.0046 * uz))
-                sxf.AddScaleOp().Set(Gf.Vec3f(ds * 0.85, 0.0020 if abs(uy) > 0.5 else 0.0060, 0.0020 if abs(uz) > 0.5 else 0.0060))
+                sxf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.00605 * uy, 0.00605 * uz))
+                sxf.AddScaleOp().Set(Gf.Vec3f(li_len * 0.90, 0.0008 if abs(uy) > 0.5 else 0.0062, 0.0008 if abs(uz) > 0.5 else 0.0062))
                 UsdGeom.Imageable(st).MakeInvisible()
                 UsdPhysics.CollisionAPI.Apply(st.GetPrim())
-                _set_col_offsets(PhysxSchema, st.GetPrim(), rest=0.00005, contact=0.0006)
+                _set_col_offsets(PhysxSchema, st.GetPrim(), rest=0.00005, contact=0.0005)
                 physicsUtils.add_physics_material_to_prim(stage, st.GetPrim(), phys_mat)
+            # 2) 2 coaxial rings x 4 diagonal (45/135/225/315 deg) radial micro-spring rubber liner pads (20mm baseline!)
+            _cuff_m = cuff_mat or phys_mat
+            pad_r_c = 0.0018
+            r_rest_center = 0.0043 + pad_r_c  # inner edge 4.3mm < 4.4mm stem & 5.4mm olive crests!
+            for r_idx, x_loc_p in enumerate((-0.012, +0.011)):
+                for k_ang in range(6):
+                    ang = k_ang * (math.pi / 3.0) + (math.pi / 6.0)  # 30, 90(TOP), 150, 210, 270(BOT), 330 -> 360-deg enclosed bore!
+                    uy, uz = math.cos(ang), math.sin(ang)
+                    pad_p = f"{scope_path}/cuff_pad_r{r_idx}_{k_ang}"
+                    pxf = UsdGeom.Xform.Define(stage, pad_p)
+                    p_world = mid + np.array([x_loc_p, r_rest_center * uy, r_rest_center * uz])
+                    pxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, p_world)))
+                    pxf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(1.0, 0.0, 0.0, 0.0))
+                    prb = UsdPhysics.RigidBodyAPI.Apply(pxf.GetPrim())
+                    prb.CreateKinematicEnabledAttr().Set(False)
+                    UsdPhysics.MassAPI.Apply(pxf.GetPrim()).CreateMassAttr().Set(0.00025)
+                    ppx = PhysxSchema.PhysxRigidBodyAPI.Apply(pxf.GetPrim())
+                    ppx.CreateLinearDampingAttr().Set(4.0)
+                    ppx.CreateAngularDampingAttr().Set(4.0)
+                    sp = UsdGeom.Sphere.Define(stage, f"{pad_p}/Sph")
+                    sp.CreateRadiusAttr(pad_r_c)
+                    UsdGeom.Imageable(sp).MakeInvisible()
+                    UsdPhysics.CollisionAPI.Apply(sp.GetPrim())
+                    _set_col_offsets(PhysxSchema, sp.GetPrim(), rest=0.00005, contact=0.0005)
+                    physicsUtils.add_physics_material_to_prim(stage, sp.GetPrim(), _cuff_m)
+                    pj = UsdPhysics.PrismaticJoint.Define(stage, f"{scope_path}/cuff_spring_r{r_idx}_{k_ang}")
+                    pj.CreateAxisAttr("X")
+                    pj.CreateBody0Rel().SetTargets([Sdf.Path(lp)])
+                    pj.CreateBody1Rel().SetTargets([Sdf.Path(pad_p)])
+                    q_rad = Gf.Rotation(Gf.Vec3d(1, 0, 0), Gf.Vec3d(0.0, uy, uz)).GetQuat()
+                    qf = Gf.Quatf(float(q_rad.GetReal()), Gf.Vec3f(*[float(v) for v in q_rad.GetImaginary()]))
+                    pj.CreateLocalPos0Attr().Set(Gf.Vec3f(float(x_loc_p), float(r_rest_center * uy), float(r_rest_center * uz)))
+                    pj.CreateLocalRot0Attr().Set(qf)
+                    pj.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+                    pj.CreateLocalRot1Attr().Set(qf)
+                    pj.CreateLowerLimitAttr().Set(-0.0003)
+                    pj.CreateUpperLimitAttr().Set(0.0035)
+                    drv = UsdPhysics.DriveAPI.Apply(pj.GetPrim(), "linear")
+                    drv.CreateTypeAttr("force")
+                    drv.CreateStiffnessAttr().Set(180.0)
+                    drv.CreateDampingAttr().Set(9.0)
+                    drv.CreateMaxForceAttr().Set(3.5)
+                    drv.CreateTargetPositionAttr().Set(0.0)
+                    cuff_pad_info.append(
+                        {
+                            "pad_prim": pad_p,
+                            "host_prim": lp,
+                            "p_loc": np.array([x_loc_p, r_rest_center * uy, r_rest_center * uz], dtype=np.float64),
+                            "stiffness": 180.0,
+                            "max_force": 3.5,
+                        }
+                    )
         else:
             cap = UsdGeom.Capsule.Define(stage, f"{lp}/Col")
             cap.CreateAxisAttr("X")
-            cap.CreateRadiusAttr(float(rod_spec.capsule_radius_m))
-            cap.CreateHeightAttr(max(0.001, ds * 0.25))
+            cap.CreateRadiusAttr(0.0062 if add_cuff_micro_springs else float(rod_spec.capsule_radius_m))
+            cap.CreateHeightAttr(max(0.001, li_len * 0.25))
             UsdGeom.Imageable(cap).MakeInvisible()
             UsdPhysics.CollisionAPI.Apply(cap.GetPrim())
             _set_col_offsets(PhysxSchema, cap.GetPrim(), rest=0.0001, contact=0.0006)
@@ -357,12 +363,10 @@ def _build_rod_links(
         link_prims.append(lp)
         link_xfs.append(UsdGeom.Xformable(xf.GetPrim()))
 
-        # Connect link i to previous body (either world/root chuck or link i-1)
         prev_p = anchor_root_prim if i == 0 else link_prims[i - 1]
         if i == 0 and (anchor_root_prim is not None or motor_twist_root):
             if is_d6:
                 if motor_twist_root:
-                    # Fixed articulation base body -> RevoluteJoint("X") -> link_00 (PhysX 5 requires FixedJoint at articulation root!)
                     base_p = f"{scope_path}/motor_fixed_base"
                     bxf = UsdGeom.Xform.Define(stage, base_p)
                     bxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, p0)))
@@ -378,7 +382,7 @@ def _build_rod_links(
                     rj.CreateBody0Rel().SetTargets([Sdf.Path(base_p)])
                     rj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
                     rj.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-                    rj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * ds, 0.0, 0.0))
+                    rj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * li_len, 0.0, 0.0))
                     motor_drv = UsdPhysics.DriveAPI.Apply(rj.GetPrim(), "angular")
                     motor_drv.CreateTypeAttr("force")
                     motor_drv.CreateStiffnessAttr().Set(0.75)
@@ -388,20 +392,21 @@ def _build_rod_links(
                     fj = UsdPhysics.FixedJoint.Define(stage, f"{scope_path}/j_root")
                     fj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
                     fj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, p0)))
-                    fj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * ds, 0.0, 0.0))
+                    fj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * li_len, 0.0, 0.0))
             else:
                 sj = UsdPhysics.SphericalJoint.Define(stage, f"{scope_path}/j_root")
                 sj.CreateBody0Rel().SetTargets([Sdf.Path(prev_p)])
                 sj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
                 sj.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
-                sj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * ds, 0.0, 0.0))
+                sj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * li_len, 0.0, 0.0))
         elif prev_p is not None:
+            prev_len = float(link_lens[i - 1])
             if is_d6:
                 j = UsdPhysics.Joint.Define(stage, f"{scope_path}/d6_{i:02d}")
                 j.CreateBody0Rel().SetTargets([Sdf.Path(prev_p)])
                 j.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
-                j.CreateLocalPos0Attr().Set(Gf.Vec3f(+0.5 * ds, 0.0, 0.0))
-                j.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * ds, 0.0, 0.0))
+                j.CreateLocalPos0Attr().Set(Gf.Vec3f(+0.5 * prev_len, 0.0, 0.0))
+                j.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * li_len, 0.0, 0.0))
                 for ax in ("transX", "transY", "transZ"):
                     lim = UsdPhysics.LimitAPI.Apply(j.GetPrim(), ax)
                     lim.CreateLowAttr(1.0)
@@ -416,10 +421,9 @@ def _build_rod_links(
                 sj = UsdPhysics.SphericalJoint.Define(stage, f"{scope_path}/sph_{i:02d}")
                 sj.CreateBody0Rel().SetTargets([Sdf.Path(prev_p)])
                 sj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
-                sj.CreateLocalPos0Attr().Set(Gf.Vec3f(+0.5 * ds, 0.0, 0.0))
-                sj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * ds, 0.0, 0.0))
+                sj.CreateLocalPos0Attr().Set(Gf.Vec3f(+0.5 * prev_len, 0.0, 0.0))
+                sj.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5 * li_len, 0.0, 0.0))
 
-    # Disable self-collision between adjacent links (i, i+1) and (i, i+2) + cuff pads
     for i in range(n_links - 1):
         fp = UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(link_prims[i]))
         fp.CreateFilteredPairsRel().AddTarget(Sdf.Path(link_prims[i + 1]))
@@ -430,6 +434,8 @@ def _build_rod_links(
             fp = UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(ci["pad_prim"]))
             fp.CreateFilteredPairsRel().AddTarget(Sdf.Path(link_prims[0]))
             fp.CreateFilteredPairsRel().AddTarget(Sdf.Path(link_prims[1]))
+            fp.CreateFilteredPairsRel().AddTarget(Sdf.Path("/World/B3_GripPadF"))
+            fp.CreateFilteredPairsRel().AddTarget(Sdf.Path("/World/B3_GripPadR"))
             for cj in cuff_pad_info:
                 if cj["pad_prim"] != ci["pad_prim"]:
                     fp.CreateFilteredPairsRel().AddTarget(Sdf.Path(cj["pad_prim"]))
@@ -452,6 +458,7 @@ def _build_rod_links(
         "pts_attr": pts_attr,
         "nrm_attr": nrm_attr,
         "ds": ds,
+        "link0_half": 0.5 * float(link_lens[0]),
         "motor_drv": motor_drv,
     }
 
@@ -460,17 +467,19 @@ def _build_fem_hose(
     stage: Any, UsdGeom: Any, UsdShade: Any, PhysxSchema: Any, Sdf: Any, Gf: Any, Vt: Any,
     deformableUtils: Any, physicsUtils: Any,
     path: str, p0: np.ndarray, p1: np.ndarray, *, mat_path: str, vis_mat: Any,
-    attach_prim_path: str | None = None, youngs_pa: float = 2.4e6,
+    attach_prim_path: str | None = None, youngs_pa: float = 0.55e6,
+    r_in: float = 0.0044, r_out: float = 0.0068, r_out_body: float = 0.0062,
 ) -> dict[str, Any]:
-    """Build Route B Non-Uniform Adaptive Hollow-Tube PhysX 5 GPU Volume Deformable Body."""
+    """Build Route B Non-Uniform Adaptive Hollow-Tube PhysX 5 GPU Volume Deformable Body (v10.1 graded wall)."""
     ctrl = np.linspace(p0, p1, 14)
     mesh = build_adaptive_hollow_tube_tet_mesh(
         ctrl,
-        r_in=0.0031,
-        r_out=0.0049,
+        r_in=r_in,
+        r_out=r_out,
+        r_out_body=r_out_body,
         n_theta=10,
         cuff_length_m=0.045,
-        cuff_ds_m=0.0050,
+        cuff_ds_m=0.0045,
         body_ds_m=0.014,
         dense_both_ends=False,
     )
@@ -535,7 +544,25 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
     from isaacsim import SimulationApp
 
     record_video = bool(job.get("record_video", True))
-    app = SimulationApp({"headless": True, "renderer": "RayTracedLighting", "anti_aliasing": 1})
+    gpu_id = int(job.get("gpu_id", 0))
+    log_dir = Path(os.environ.get("ISAACSIM_PORTABLE_ROOT", "/tmp")) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    kit_log = (log_dir / f"v10_3way_{job.get('trial_id', 't')}_g{gpu_id}.log").as_posix()
+    app = SimulationApp({
+        "headless": True,
+        "renderer": "RayTracedLighting",
+        "active_gpu": gpu_id,
+        "physics_gpu": gpu_id,
+        "multi_gpu": False,
+        "anti_aliasing": 1,
+        "extra_args": [
+            "--/rtx/verifyDriverVersion/enabled=false",
+            "--/renderer/multiGpu/enabled=false",
+            f"--/renderer/activeGpu={gpu_id}",
+            f"--/physics/cudaDevice={gpu_id}",
+            f"--/log/file={kit_log}",
+        ],
+    })
 
     import omni.kit.app
     import omni.physx
@@ -668,9 +695,9 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
     Z_LOWER_BARB = 0.885
     Z_UPPER_BARB = 0.955
     for bname, bz in (("LowerInletBarb", Z_LOWER_BARB), ("UpperOutletBarb", Z_UPPER_BARB)):
-        # 4-bead tapered laboratory glass barb: stem -> rear neck (3.4mm) -> interference bead (4.0mm > 3.1mm bore!) -> taper (2.7mm) -> lead nose (1.8mm)
-        _create_rigid_cyl(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, f"/World/B3_{bname}_Stem", (-0.022, Y3, bz), 0.0034, 0.040, "X", mat_glass, pmat_barb)
-        for si, (bx, br) in enumerate(((+0.005, 0.0034), (+0.013, 0.0040), (+0.020, 0.0027), (+0.025, 0.0018))):
+        # v10.1 Full 3-olive serrated glass barb (r_stem=4.4mm, 3 interference olives r=5.4mm > 4.4mm bore -> ~23-27% hoop expansion, 38mm total length!)
+        _create_rigid_cyl(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, f"/World/B3_{bname}_Stem", (-0.022, Y3, bz), 0.0044, 0.042, "X", mat_glass, pmat_barb)
+        for si, (bx, br) in enumerate(((-0.002, 0.0054), (+0.007, 0.0054), (+0.016, 0.0052), (+0.022, 0.0038), (+0.026, 0.0024))):
             sp = UsdGeom.Sphere.Define(stage, f"/World/B3_{bname}_Bead{si}")
             sp.CreateRadiusAttr(float(br))
             UsdGeom.Xformable(sp).AddTranslateOp().Set(Gf.Vec3d(bx, Y3, bz))
@@ -681,7 +708,10 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
 
     z_tgt = Z_UPPER_BARB if target_port == "upper_outlet" else Z_LOWER_BARB
     # Retractable Anti-roll Lab Staging Rest supporting the hose tail during staging (retracts at f=68 so hose hangs 100% freely on glass barb!)
-    _, rest_t_op, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_RearHoseRest", (0.145, Y3, z_tgt - 0.011), (0.13, 0.028, 0.012), mat_steel, pmat_slip, kinematic=True)
+    _rest_x = 0.145 if method == "route_b_physx_fem" else 0.125
+    _rest_sx = 0.13 if method == "route_b_physx_fem" else 0.17
+    _rest_dz = 0.013 if method == "route_b_physx_fem" else 0.0124
+    _, rest_t_op, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_RearHoseRest", (_rest_x, Y3, z_tgt - _rest_dz), (_rest_sx, 0.028, 0.012), mat_steel, pmat_slip, kinematic=True)
     # Free dynamic latex hose starting coaxial 4 mm in front of tapered barb lead-nose (ZERO FixedJoint, ZERO attachment!)
     b3_p0 = np.array([0.029, Y3, z_tgt], dtype=np.float64)
     b3_p1 = np.array([0.209, Y3, z_tgt], dtype=np.float64)
@@ -695,8 +725,8 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
         )
 
     # Opposing dynamic-contact robot gripper finger pads pinching right behind the cuff (x=0.056, 27mm behind mouth -> coaxial stability!)
-    _, pad_f_t, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_GripPadF", (0.056, Y3 - 0.0092, z_tgt), (0.028, 0.008, 0.018), mat_pad, pmat_grip, kinematic=True)
-    _, pad_r_t, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_GripPadR", (0.056, Y3 + 0.0092, z_tgt), (0.028, 0.008, 0.018), mat_pad, pmat_grip, kinematic=True)
+    _, pad_f_t, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_GripPadF", (0.056, Y3 - 0.0108, z_tgt), (0.028, 0.008, 0.018), mat_pad, pmat_grip, kinematic=True)
+    _, pad_r_t, _ = _create_rigid_box(stage, UsdGeom, UsdPhysics, PhysxSchema, UsdShade, physicsUtils, Gf, "/World/B3_GripPadR", (0.056, Y3 + 0.0108, z_tgt), (0.028, 0.008, 0.018), mat_pad, pmat_grip, kinematic=True)
 
     # Verify ZERO FixedJoints anywhere on Bench 3 (strict zero-cheat barb insertion!)
     b3_weld_count = 0
@@ -778,42 +808,83 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
         if method == "route_a_d6_der" and b2_hose.get("motor_drv") is not None:
             b2_hose["motor_drv"].GetTargetPositionAttr().Set(float(ang_deg))
 
-        # 3. Bench 3 gripper schedule: instant firm pinch (f=0..6) -> coaxial push onto barb (-26mm) -> retract staging rest & open gripper (f=68..126 hands-off hang!) -> re-grasp & pull off!
+        # 3. Bench 3 v10.1 authentic 2-step inchworm re-grasp push covering ALL 3 glass olives (>=28mm depth!) -> hands-off hang -> re-grasp & pull-off!
+        gy_pinch = 0.0080 if method == "route_b_physx_fem" else 0.0094
+        gy_pull_pinch = 0.0070 if method == "route_b_physx_fem" else 0.0092
         if f < 6:
+            # Pinch close to mouth (gx=0.052, only 23mm behind mouth x=0.029 -> zero mid-span buckling!)
             u = f / 5.0
-            gx = 0.056
-            gy_off = (1.0 - u) * 0.0092 + u * 0.0070  # inner face at 3.0mm firmly pinches 4.9mm hose wall!
+            gx = 0.052
+            gy_off = (1.0 - min(1.0, u * 2.5)) * 0.0108 + min(1.0, u * 2.5) * gy_pinch  # inner face 4.0mm firmly pinches 6.8mm hose wall!
             gz = z_tgt
-        elif f < 64:
-            u = (f - 6) / 58.0
-            gx = 0.056 - u * 0.025  # push hose mouth from x=0.029 -> x=0.004 (21mm deep over r=4.0mm barb bead!)
-            gy_off = 0.0070
+        elif f < 34:
+            # Push 1: advance -24mm (gx: 0.052 -> 0.028) clearing olive #1 (+16mm) & olive #2 (+7mm)!
+            u = (f - 6) / 28.0
+            gx = 0.052 - u * 0.028
+            gy_off = gy_pinch
+            gz = z_tgt
+        elif f < 37:
+            # Open jaws cleanly BEFORE retracting (stationary gx=0.028 so high-friction pads never pull hose back!)
+            u = (f - 34) / 3.0
+            gx = 0.024
+            gy_off = gy_pinch + u * 0.014
+            gz = z_tgt
+        elif f < 41:
+            # Retract WIDE OPEN to gx=0.048 while hose stays locked on olive #1/#2
+            u = (f - 37) / 4.0
+            gx = 0.024 + u * 0.024
+            gy_off = gy_pinch + 0.014
+            gz = z_tgt
+        elif f < 44:
+            # Re-pinch firmly at stationary gx=0.048
+            u = (f - 41) / 3.0
+            gx = 0.048
+            gy_off = (1.0 - u) * (gy_pinch + 0.014) + u * gy_pinch
             gz = z_tgt
         elif f < 74:
-            u = (f - 64) / 10.0
-            gx = 0.031
-            gy_off = 0.0070 + u * 0.021
+            # Push 2: drive mouth cleanly past olive #3 (-2mm) to ~32mm full depth (covers all 3 olives & barb tip!)
+            u = (f - 44) / 30.0
+            _p2_stroke = 0.024 if method == "route_b_physx_fem" else 0.014
+            gx = 0.048 - u * _p2_stroke
+            gy_off = gy_pinch
+            gz = z_tgt
+        elif f < 82:
+            # Release gripper cleanly
+            u = (f - 74) / 8.0
+            gx = 0.024 if method == "route_b_physx_fem" else 0.034
+            gy_off = gy_pinch + u * 0.022
             gz = z_tgt
         elif f < 126:
-            # Pure hands-off gravity hang on glass barb (52 frames = 1.73s)!
-            gx = 0.031
-            gy_off = 0.028
+            # Pure hands-off gravity hang on all 3 glass olives (44 frames = 1.47s)!
+            gx = 0.024
+            gy_off = 0.030
             gz = z_tgt + 0.048
-        elif f < 140:
-            u = (f - 126) / 14.0
-            gx = 0.031
-            gy_off = (1.0 - u) * 0.026 + u * 0.0070
-            gz = (1.0 - u) * (z_tgt + 0.048) + u * z_tgt
+        elif f < 134:
+            u = (f - 126) / 8.0
+            _gx_pull0 = 0.036 if method == "route_b_physx_fem" else 0.022
+            _gz_pull0 = (z_tgt - 0.005) if method == "route_b_physx_fem" else z_tgt
+            gx = (1.0 - u) * (0.024 if method == "route_b_physx_fem" else 0.034) + u * _gx_pull0
+            gy_off = 0.026
+            gz = (1.0 - u) * (z_tgt + 0.048) + u * _gz_pull0
+        elif f < 142:
+            u = (f - 134) / 8.0
+            _gx_pull0 = 0.036 if method == "route_b_physx_fem" else 0.022
+            _gz_pull0 = (z_tgt - 0.005) if method == "route_b_physx_fem" else z_tgt
+            gx = _gx_pull0
+            gy_off = (1.0 - u) * 0.026 + u * (0.0070 if method == "route_b_physx_fem" else 0.0086)
+            gz = _gz_pull0
         else:
-            u = (f - 140) / 39.0
-            gx = 0.031 + u * 0.052  # pull hose off barb +52mm!
-            gy_off = 0.0070
-            gz = z_tgt
+            u = (f - 142) / 37.0
+            _gx_pull0 = 0.036 if method == "route_b_physx_fem" else 0.022
+            _gz_pull0 = (z_tgt - 0.005) if method == "route_b_physx_fem" else z_tgt
+            gx = _gx_pull0 + u * 0.095
+            gy_off = 0.0070 if method == "route_b_physx_fem" else 0.0086
+            gz = _gz_pull0 + u * (0.005 if method == "route_b_physx_fem" else 0.0)
         pad_f_t.Set(Gf.Vec3d(gx, Y3 - gy_off, gz))
         pad_r_t.Set(Gf.Vec3d(gx, Y3 + gy_off, gz))
         # Lower rear staging rest out of the way right after seating so full hose weight hangs purely on the glass barb!
-        rest_z = (z_tgt - 0.011) if f < 66 else (z_tgt - 0.011 - min(1.0, (f - 66) / 10.0) * 0.090)
-        rest_t_op.Set(Gf.Vec3d(0.145, Y3, rest_z))
+        rest_z = (z_tgt - _rest_dz) if f < 76 else (z_tgt - _rest_dz - min(1.0, (f - 76) / 10.0) * 0.090)
+        rest_t_op.Set(Gf.Vec3d(_rest_x, Y3, rest_z))
 
         t_step0 = time.perf_counter()
         for _ in range(substeps):
@@ -871,10 +942,19 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
                 l_pos_arr = np.asarray(l_pos, dtype=np.float64)
                 tw = extract_twist_angles_from_link_frames(l_pos_arr, l_rot, local_material_axis=1)
                 # Build dense 48-ring tube matching link centers + twist
-                s_in = np.linspace(0.0, 1.0, len(l_pos_arr))
-                s_out = np.linspace(0.0, 1.0, len(l_pos_arr) + 1)
-                c_vis = np.column_stack([np.interp(s_out, s_in, l_pos_arr[:, k]) for k in range(3)])
-                v_m, n_m, _, _ = build_cosserat_twist_stripe_tube(c_vis, tw, radius_m=float(rod_spec_14.capsule_radius_m))
+                if b_idx == 2 and bh.get("link0_half", 0.0) > 0.012:
+                    p_front = l_pos_arr[0] - l_rot[0][:, 0] * float(bh["link0_half"])
+                    p_back = l_pos_arr[0] + l_rot[0][:, 0] * float(bh["link0_half"])
+                    # Replace link_00 center with [p_front, p_back] and resample body links to preserve exact vertex count (n_links + 1)!
+                    s_b_in = np.linspace(0.0, 1.0, len(l_pos_arr) - 1)
+                    s_b_out = np.linspace(0.0, 1.0, len(l_pos_arr) - 1)
+                    body_v = np.column_stack([np.interp(s_b_out, s_b_in, l_pos_arr[1:, k]) for k in range(3)])
+                    c_vis = np.vstack([p_front[None, :], p_back[None, :], body_v])
+                else:
+                    s_in = np.linspace(0.0, 1.0, len(l_pos_arr))
+                    s_out = np.linspace(0.0, 1.0, len(l_pos_arr) + 1)
+                    c_vis = np.column_stack([np.interp(s_out, s_in, l_pos_arr[:, k]) for k in range(3)])
+                v_m, n_m, _, _ = build_cosserat_twist_stripe_tube(c_vis, tw, radius_m=0.0068 if b_idx == 2 else float(rod_spec_14.capsule_radius_m))
                 bh["pts_attr"].Set(v_m.tolist())
                 bh["nrm_attr"].Set(n_m.tolist())
                 if b_idx == 0:
@@ -888,7 +968,7 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
                     b2_vane_t.Set(Gf.Vec3d(float(l_pos_arr[-1, 0]), float(l_pos_arr[-1, 1]), float(l_pos_arr[-1, 2])))
                     b2_vane_o.Set(Gf.Quatd(math.cos(hv), math.sin(hv), 0.0, 0.0))
                 else:
-                    b3_mouth_x[f] = float(l_pos_arr[0, 0] - 0.5 * bh["ds"])
+                    b3_mouth_x[f] = float(l_pos_arr[0, 0] - bh.get("link0_half", 0.5 * bh["ds"]))
                     b3_mouth_z[f] = float(l_pos_arr[0, 2])
                     f_rad = 0.0
                     for ci in bh["cuff_pad_info"]:
@@ -925,7 +1005,7 @@ def execute_hose_v10_trial(job: dict[str, Any], result_json_path: Path | None = 
     # Bench 3 Barb engagement & hands-off hang self-lock (f=95..124) + pull-off (f=165..179)
     hang_x_mm = float(np.mean(b3_mouth_x[95:124]) * 1000.0)
     hang_z_mm = float(np.mean(b3_mouth_z[95:124]) * 1000.0)
-    barb_tip_x_mm = 25.0
+    barb_tip_x_mm = 26.0
     insertion_depth_hang_mm = max(0.0, barb_tip_x_mm - hang_x_mm)
     hang_z_err_mm = abs(hang_z_mm - z_tgt * 1000.0)
     self_lock_hang_passed = (insertion_depth_hang_mm >= 6.0) and (hang_z_err_mm <= 16.0)

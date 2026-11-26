@@ -154,6 +154,7 @@ def skin_cosserat_tube(
     *,
     n_circ: int = 24,
     r_outer: float = HOSE_OUTER_RADIUS,
+    r_outer_profile: Sequence[float] | None = None,
     table_z: float = TABLE_Z_DEFAULT,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Skin a (N, 3) centerline into smooth (N*n_circ, 3) float32 vertices & unit vertex normals."""
@@ -192,7 +193,8 @@ def skin_cosserat_tube(
         # Smoothly tapered cuff swell over barb olive (no sharp step!)
         cuff = 1.0 + 0.12 * math.exp(-((i - 1.5) / 2.2) ** 2) + 0.10 * math.exp(-((i - (n_rings - 2.0)) / 2.0) ** 2)
         dirs = ca * nrm[None, :] + sa * bnm[None, :]
-        ring_pts = centerline[i][None, :] + (r_outer * cuff) * dirs
+        r_eff = float(r_outer_profile[i]) if r_outer_profile is not None else float(r_outer * cuff)
+        ring_pts = centerline[i][None, :] + r_eff * dirs
         ring_pts[:, 2] = np.maximum(ring_pts[:, 2], table_z + 0.0003)
         idx0 = i * n_circ
         verts[idx0 : idx0 + n_circ] = ring_pts.astype(np.float32)

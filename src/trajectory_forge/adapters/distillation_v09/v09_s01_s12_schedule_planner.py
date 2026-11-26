@@ -391,7 +391,7 @@ def synthesize_v09_s01_s12_schedule(
 
     p_chigh = np.array([0.020 - 0.038, -0.105, 1.180], dtype=np.float64)
     p_cpick_pre = np.array([0.020 - 0.038, -0.105, 0.900], dtype=np.float64)
-    p_cpick = np.array([0.020 - 0.038, -0.105, 0.790], dtype=np.float64)
+    p_cpick = np.array([0.020 - 0.038, -0.105, 0.814], dtype=np.float64)
     # Seat flush at `COND_SEATED_CENTER_W - 0.038 * U15` (`0.0mm` centered Y & 15.0° coaxial with Head sidearm!)
     p_ee_seated = COND_SEATED_CENTER_W - 0.0380 * U15
     p_ee_pre_mate = p_ee_seated + 0.044 * U15

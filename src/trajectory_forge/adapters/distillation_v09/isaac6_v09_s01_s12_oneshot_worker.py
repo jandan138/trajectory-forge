@@ -35,13 +35,21 @@ from typing import Any, Sequence
 
 import numpy as np
 
-os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", r"I:\isaacsim-data\6.0.1")
-os.environ.setdefault("TEMP", r"I:\isaacsim-data\6.0.1\temp")
-os.environ.setdefault("TMP", r"I:\isaacsim-data\6.0.1\temp")
+if os.name == "nt":
+    os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", r"I:\isaacsim-data\6.0.1")
+    os.environ.setdefault("TEMP", r"I:\isaacsim-data\6.0.1\temp")
+    os.environ.setdefault("TMP", r"I:\isaacsim-data\6.0.1\temp")
+else:
+    _isaac_root = os.environ.setdefault("ISAACSIM_PORTABLE_ROOT", "/root/hose_v10_1_work/isaac60_data")
+    os.environ.setdefault("TMPDIR", "/root/hose_v10_1_work/isaac60_tmp")
+    Path(_isaac_root, "logs").mkdir(parents=True, exist_ok=True)
+    Path("/root/hose_v10_1_work/isaac60_tmp").mkdir(parents=True, exist_ok=True)
 
 _SRC_ROOT = str(Path(__file__).resolve().parents[3])
-if _SRC_ROOT not in sys.path:
-    sys.path.insert(0, _SRC_ROOT)
+_CA_ROOT = str(Path(__file__).resolve().parents[5] / "ConvertAsset")
+for _p in (_SRC_ROOT, _CA_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from trajectory_forge.adapters.distillation_v06.cosserat_hose_solver_v06 import skin_cosserat_tube  # noqa: E402
 from trajectory_forge.adapters.distillation_v09.v09_s01_s12_schedule_planner import (  # noqa: E402
@@ -291,7 +299,7 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     record_video = bool(job.get("record_video", True))
     max_frames_override = int(job.get("max_frames", 0))
     hose_mode = str(job.get("hose_mode", "d6_der")).strip().lower()
-    if hose_mode not in ("d6_der", "physx_fem"):
+    if hose_mode not in ("d6_der", "physx_fem", "bead_chain"):
         raise ValueError(f"Unsupported hose_mode={hose_mode!r}; expected 'd6_der' or 'physx_fem'")
 
     spec = json.loads((pkg_root / "semantics" / "v09_scene_spec.json").read_text(encoding="utf-8"))
@@ -308,28 +316,41 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     from PIL import Image, ImageDraw, ImageFont  # type: ignore
     from isaacsim import SimulationApp
 
+    gpu_id = int(job.get("gpu_id", 0))
+    log_dir = Path(os.environ.get("ISAACSIM_PORTABLE_ROOT", "/tmp")) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    kit_log = (log_dir / f"v09_{job.get('episode_id', 'ep')}_g{gpu_id}.log").as_posix()
     spp = 6 if (record_video and not zero_friction) else (3 if record_video else 1)
+    extra_args = [
+        "--/app/asyncRendering=False",
+        "--/physics/updateToUsd=True",
+        "--/physics/suppressReadback=False",
+        "--/rtx/hydra/materialSyncLoads=True",
+        "--/rtx/translucency/enabled=True",
+        "--/rtx/reflections/enabled=True",
+        "--/rtx/translucency/maxRefractionBounces=16",
+        "--/rtx/raytracing/maxBounces=16",
+        "--/rtx-transient/dlssg/enabled=False",
+        "--/persistent/omni/replicator/captureOnPlay=False",
+        "--/omni/replicator/captureOnPlay=False",
+        "--/rtx/verifyDriverVersion/enabled=false",
+        "--/renderer/multiGpu/enabled=false",
+        f"--/renderer/activeGpu={gpu_id}",
+        f"--/physics/cudaDevice={gpu_id}",
+        f"--/log/file={kit_log}",
+    ]
     app = SimulationApp(
         {
             "headless": True,
             "renderer": "RayTracedLighting" if record_video else "MinimalRendering",
+            "active_gpu": gpu_id,
+            "physics_gpu": gpu_id,
+            "multi_gpu": False,
             "samples_per_pixel_per_frame": spp,
             "denoiser": bool(record_video),
             "anti_aliasing": 3 if record_video else 0,
             "fast_shutdown": True,
-            "extra_args": [
-                "--/app/asyncRendering=False",
-                "--/physics/updateToUsd=True",
-                "--/physics/suppressReadback=False",
-                "--/rtx/hydra/materialSyncLoads=True",
-                "--/rtx/translucency/enabled=True",
-                "--/rtx/reflections/enabled=True",
-                "--/rtx/translucency/maxRefractionBounces=16",
-                "--/rtx/raytracing/maxBounces=16",
-                "--/rtx-transient/dlssg/enabled=False",
-                "--/persistent/omni/replicator/captureOnPlay=False",
-                "--/omni/replicator/captureOnPlay=False",
-            ],
+            "extra_args": extra_args,
         }
     )
 
@@ -340,9 +361,14 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, UsdUtils, Vt
 
     try:
-        f_title = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 15)
-        f_sub = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 12)
-        f_mono = ImageFont.truetype(r"C:\Windows\Fonts\consolab.ttf", 11)
+        if os.name == "nt":
+            f_title = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 15)
+            f_sub = ImageFont.truetype(r"C:\Windows\Fonts\msyh.ttc", 12)
+            f_mono = ImageFont.truetype(r"C:\Windows\Fonts\consolab.ttf", 11)
+        else:
+            f_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
+            f_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12)
+            f_mono = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 11)
     except Exception:
         f_title = f_sub = f_mono = ImageFont.load_default()
 
@@ -837,13 +863,13 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
         vxf.AddScaleOp().Set(Gf.Vec3f(0.004, 0.007, 0.127))
         UsdShade.MaterialBindingAPI.Apply(vp.GetPrim()).Bind(UsdShade.Material(stage.GetPrimAtPath("/World/Looks/BenchTrimDark")))
 
-    # Condenser V-Rest at `(0.020, -0.105, 0.750)` (`cradles at x=-0.068/+0.058, completely clear of ArmL [-0.057, -0.019] grasp zone!`)
+    # Condenser V-Rest at `(0.020, -0.105, 0.750)` raised +18 mm (top 0.0418 m -> cond_z=0.808 m) so full 38 mm serrated barbs + 6.8 mm hose clear bench at t=0!
     vrest = UsdGeom.Xform.Define(stage, "/World/Environment/CondenserBenchRest")
     vrest.AddTranslateOp().Set(Gf.Vec3d(0.020, -0.105, 0.750))
-    for rx, wx, rtag in ((-0.068, 0.008, "Neg"), (+0.058, 0.012, "Pos")):
-        _add_invisible_col("/World/Environment/CondenserBenchRest", f"R_{rtag}", "box", (rx, 0.0, 0.0119), (wx, 0.036, 0.0238), bench_mat)
-        _add_invisible_col("/World/Environment/CondenserBenchRest", f"RF_{rtag}", "box", (rx, -0.019, 0.0245), (wx, 0.005, 0.005), bench_mat)
-        _add_invisible_col("/World/Environment/CondenserBenchRest", f"RR_{rtag}", "box", (rx, +0.019, 0.0245), (wx, 0.005, 0.005), bench_mat)
+    for rx, wx, rtag in ((-0.060, 0.005, "Neg"), (+0.056, 0.010, "Pos")):
+        _add_invisible_col("/World/Environment/CondenserBenchRest", f"R_{rtag}", "box", (rx, 0.0, 0.0239), (wx, 0.030, 0.0478), bench_mat)
+        _add_invisible_col("/World/Environment/CondenserBenchRest", f"RF_{rtag}", "box", (rx, -0.0165, 0.0485), (wx, 0.004, 0.005), bench_mat)
+        _add_invisible_col("/World/Environment/CondenserBenchRest", f"RR_{rtag}", "box", (rx, +0.0165, 0.0485), (wx, 0.004, 0.005), bench_mat)
 
     # Tail Adapter Cradle at `(+0.310 + 0.056, +0.015, 0.750)` (`supports TailGripStem bottom -0.040m at z_world = 0.815m -> tail_z = 0.855m!`)
     t_cradle = UsdGeom.Xform.Define(stage, "/World/Environment/TailBenchCradle")
@@ -1075,52 +1101,90 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     )
     manipulated_prims.append(cond_p)
 
-    # Upgraded Cooling Hoses:
-    # - `hose_mode == "d6_der"`: Route A D6-DER Elastic Rod (`2 x 24` links with bending/torsion drives)
-    # - `hose_mode == "physx_fem"`: Route B PhysX 5 GPU FEM Non-Uniform Adaptive Hollow-Tube Tet Mesh (`create_auto_deformable_attachment`, ZERO FixedJoint!)
-    # Far ends terminate cleanly on the Lab Cold-Water Faucet Brass Barb (+0.390,-0.245,0.855) & Embedded PP Sink (-0.390,-0.245,0.798)!
+    # Upgraded Cooling Hoses (v10.1 Coaxial Full-Depth 3-Olive Interference Fit — ZERO FixedJoint / ZERO Condenser AutoAttachment!):
+    from convert_asset.hose_softbody_v10 import (
+        DEFAULT_CONDENSER_BARB_V10,
+        SURGICAL_LATEX_V10_1_SPEC,
+        build_adaptive_hollow_tube_tet_mesh,
+        build_coaxial_barb_hose_centerline,
+        compute_cuff_hoop_and_pinch_strain,
+    )
+
+    barb_geom = DEFAULT_CONDENSER_BARB_V10
+    latex_mat = SURGICAL_LATEX_V10_1_SPEC
+    _c0_xf = UsdGeom.Xformable(stage.GetPrimAtPath(cond_p)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    cond_p0_w = np.array(list(_c0_xf.ExtractTranslation()), dtype=np.float64)
+    _c0_r = _c0_xf.ExtractRotationMatrix()
+    cond_R0_w = np.array([[_c0_r[0][0], _c0_r[1][0], _c0_r[2][0]], [_c0_r[0][1], _c0_r[1][1], _c0_r[2][1]], [_c0_r[0][2], _c0_r[1][2], _c0_r[2][2]]], dtype=np.float64)
+
+    # 1:1 3-olive glass barb colliders on dynamic `liebig_condenser_24_29` (shared by BOTH Route A and Route B!)
+    barb_glass_mat = "/World/PhysMaterials/CondenserBarbGlassMat"
+    _bm_p = UsdShade.Material.Define(stage, barb_glass_mat)
+    _bma = UsdPhysics.MaterialAPI.Apply(_bm_p.GetPrim())
+    _bma.CreateStaticFrictionAttr(0.0 if zero_friction else 1.25)
+    _bma.CreateDynamicFrictionAttr(0.0 if zero_friction else 1.05)
+    _bma.CreateRestitutionAttr(0.02)
+    _barb_sphere_stations = (
+        (0.005, 0.0044),
+        (0.010, 0.0056),
+        (0.0145, 0.0044),
+        (0.019, 0.0056),
+        (0.0235, 0.0044),
+        (0.028, 0.0056),
+        (0.033, 0.0044),
+        (0.037, 0.0034),
+    )
+    u_barb_l = barb_geom.unit_axis_local()
+    for hkey in ("inlet", "outlet"):
+        p_orig_l = barb_geom.origin_local(hkey)
+        for idx_s, (ss, rr) in enumerate(_barb_sphere_stations):
+            pl = p_orig_l + ss * u_barb_l
+            bp_c = _add_invisible_col(
+                cond_p, f"GlassBarb_{hkey}_Sph{idx_s}", "sphere", tuple(map(float, pl)), (float(rr),), barb_glass_mat
+            )
+            _px_b = PhysxSchema.PhysxCollisionAPI.Apply(bp_c)
+            _px_b.CreateRestOffsetAttr().Set(0.00005)
+            _px_b.CreateContactOffsetAttr().Set(0.0005)
+
     UsdGeom.Scope.Define(stage, "/World/PhysHoseChains")
     hose_chain_xfs: dict[str, list[Any]] = {"inlet": [], "outlet": []}
+    hose_cuff_xfs: dict[str, Any] = {}
     fem_hoses: dict[str, dict[str, Any]] = {}
     fem_total_tets = 0
-    if hose_mode == "physx_fem":
-        from convert_asset.hose_softbody_v10.adaptive_hollow_tet_mesh import build_adaptive_hollow_tube_tet_mesh
+    hose_end_anchors = {
+        "inlet": np.array([+0.390, -0.245, 0.855], dtype=np.float64),
+        "outlet": np.array([-0.390, -0.245, 0.798], dtype=np.float64),
+    }
 
-        # Deformable latex physics material (soft amber surgical latex: 1.35 MPa, nu=0.38, rho=1050 kg/m^3)
+    if hose_mode == "physx_fem":
         fem_mat_path = "/World/PhysMaterials/AmberLatexFemMat"
         deformableUtils.add_deformable_material(
             stage,
             fem_mat_path,
-            density=1050.0,
-            static_friction=0.0 if zero_friction else 0.75,
-            dynamic_friction=0.0 if zero_friction else 0.60,
-            youngs_modulus=1.35e6,
-            poissons_ratio=0.38,
+            density=float(latex_mat.density_kg_m3),
+            static_friction=0.0 if zero_friction else float(latex_mat.static_friction),
+            dynamic_friction=0.0 if zero_friction else float(latex_mat.dynamic_friction),
+            youngs_modulus=float(min(latex_mat.youngs_modulus_pa, 0.40e6)),
+            poissons_ratio=float(latex_mat.poissons_ratio),
         )
-        # Hide legacy Cosserat visual tubes so genuine live FEM tet-surface meshes are rendered directly!
         for legacy_p in ("/World/CoolingHoses/Hose_Inlet_Lower", "/World/CoolingHoses/Hose_Outlet_Upper"):
             lp_old = stage.GetPrimAtPath(legacy_p)
             if lp_old.IsValid():
                 UsdGeom.Imageable(lp_old).MakeInvisible()
 
-        n_ctrl = 24
-        for hkey, barb_fem_local, p_end_w in (
-            ("inlet", np.array([+0.078, -0.024, -0.022]), np.array([+0.390, -0.245, 0.855])),
-            ("outlet", np.array([-0.078, -0.024, -0.022]), np.array([-0.390, -0.245, 0.798])),
-        ):
-            p_start_w = np.array([0.020, -0.105, 0.790], dtype=np.float64) + barb_fem_local
-            nodes = []
-            for i in range(n_ctrl + 1):
-                s = i / float(n_ctrl)
-                pt = (1.0 - s) * p_start_w + s * p_end_w
-                pt[1] -= 0.115 * math.sin(math.pi * s) - 0.055 * math.sin(3.0 * math.pi * s)
-                pt[2] = max(0.7565, float(pt[2]) - 0.045 * math.sin(math.pi * s))
-                nodes.append(pt)
-            # Clear attachment sphere on dynamic condenser barb (100% clear of CondenserBenchRest cradles & bench!)
-            barb_col_prim = _add_invisible_col(
-                cond_p, f"FemBarbAnchor_{hkey}", "sphere", tuple(map(float, barb_fem_local)), (0.0058,), glass_grip_mat
+        for hkey in ("inlet", "outlet"):
+            p_orig_w, u_ax_w = barb_geom.world_origin_and_axis(cond_p0_w, cond_R0_w, hkey)
+            p_end_w = hose_end_anchors[hkey]
+            nodes = build_coaxial_barb_hose_centerline(
+                p_orig_w,
+                u_ax_w,
+                p_end_w,
+                seat_start_s_m=barb_geom.seat_start_s_m,
+                seat_length_m=barb_geom.seat_end_s_m - barb_geom.seat_start_s_m,
+                exit_tangent_m=0.016,
+                bench_z_min=0.7615,
+                slack_y_m=0.285,
             )
-            # Static attachment anchor sphere at faucet brass barb / embedded PP sink
             end_anchor_p = f"/World/Environment/FemEndAnchor_{hkey}"
             esph = UsdGeom.Sphere.Define(stage, end_anchor_p)
             esph.CreateRadiusAttr(0.0095)
@@ -1131,45 +1195,48 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
 
             tmesh = build_adaptive_hollow_tube_tet_mesh(
                 nodes,
-                r_in=0.0031,
-                r_out=0.0049,
-                n_theta=8,
-                cuff_length_m=0.036,
-                cuff_ds_m=0.006,
-                body_ds_m=0.016,
+                r_in=float(latex_mat.inner_radius_m),
+                r_out=float(latex_mat.outer_radius_m),
+                r_out_body=float(latex_mat.effective_body_outer_radius_m),
+                n_theta=10,
+                cuff_length_m=0.042,
+                cuff_ds_m=0.0045,
+                body_ds_m=0.018,
                 dense_both_ends=True,
+                barb_prestretch_fn=barb_geom.radius_at_s,
+                prestretch_length_m=float(barb_geom.seat_end_s_m - barb_geom.seat_start_s_m),
+                prestretch_s_offset_m=float(barb_geom.seat_start_s_m),
+                prestretch_clearance_m=0.00025,
             )
             fem_total_tets += int(len(tmesh.tets))
             tet_path = f"/World/PhysHoseChains/FemHose_{hkey}"
             tet_prim = UsdGeom.TetMesh.Define(stage, tet_path)
             pts_attr = tet_prim.CreatePointsAttr(
-                Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in tmesh.rest_points])
+                Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in tmesh.init_points])
             )
             tet_prim.CreateTetVertexIndicesAttr(
                 Vt.Vec4iArray([Gf.Vec4i(int(t[0]), int(t[1]), int(t[2]), int(t[3])) for t in tmesh.tets])
             )
             deformableUtils.set_physics_volume_deformable_body(stage, Sdf.Path(tet_path))
+            tet_prim.GetPrim().GetAttribute("omniphysics:restShapePoints").Set(
+                Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in tmesh.rest_points])
+            )
             px_col = PhysxSchema.PhysxCollisionAPI.Apply(tet_prim.GetPrim())
-            px_col.CreateRestOffsetAttr().Set(0.0002)
-            px_col.CreateContactOffsetAttr().Set(0.0012)
+            px_col.CreateRestOffsetAttr().Set(0.0007)
+            px_col.CreateContactOffsetAttr().Set(0.0016)
             tet_prim.GetPrim().ApplyAPI("PhysxBaseDeformableBodyAPI")
-            tet_prim.GetPrim().GetAttribute("physxDeformableBody:solverPositionIterationCount").Set(48)
-            tet_prim.GetPrim().GetAttribute("physxDeformableBody:linearDamping").Set(1.6)
+            tet_prim.GetPrim().GetAttribute("physxDeformableBody:solverPositionIterationCount").Set(64)
+            tet_prim.GetPrim().GetAttribute("physxDeformableBody:linearDamping").Set(1.8)
             physicsUtils.add_physics_material_to_prim(stage, tet_prim.GetPrim(), fem_mat_path)
             UsdGeom.Imageable(tet_prim).MakeInvisible()
 
-            # Genuine PhysX deformable auto-attachments at both condenser barb (dynamic) & utility end (static)
-            deformableUtils.create_auto_deformable_attachment(
-                stage, Sdf.Path(f"{tet_path}_AttachCond"), Sdf.Path(tet_path), barb_col_prim.GetPath()
-            )
             deformableUtils.create_auto_deformable_attachment(
                 stage, Sdf.Path(f"{tet_path}_AttachEnd"), Sdf.Path(tet_path), Sdf.Path(end_anchor_p)
             )
 
-            # Live FEM surface mesh synced directly from tet vertices (with dark-amber longitudinal torsion stripe!)
             vis_m = UsdGeom.Mesh.Define(stage, f"{tet_path}_VisMesh")
             v_pts_attr = vis_m.CreatePointsAttr(
-                Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in tmesh.rest_points])
+                Vt.Vec3fArray([Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in tmesh.init_points])
             )
             vis_m.CreateFaceVertexCountsAttr([3] * len(tmesh.surface_tris))
             vis_m.CreateFaceVertexIndicesAttr(tmesh.surface_tris.ravel().tolist())
@@ -1180,26 +1247,115 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
                 v_cols[out_ids[tmesh.n_theta // 2]] = (0.28, 0.13, 0.03)
             vis_m.CreateDisplayColorAttr(v_cols.tolist())
             vis_m.GetDisplayColorPrimvar().SetInterpolation(UsdGeom.Tokens.vertex)
-            fem_hoses[hkey] = {"tet_path": tet_path, "pts_attr": pts_attr, "vis_pts_attr": v_pts_attr, "n_tets": int(len(tmesh.tets))}
+            fem_hoses[hkey] = {
+                "tet_path": tet_path,
+                "pts_attr": pts_attr,
+                "vis_pts_attr": v_pts_attr,
+                "mesh": tmesh,
+                "n_tets": int(len(tmesh.tets)),
+            }
     else:
-        n_hlinks = 24
-        k_hose_bend_d6 = 0.00024  # Soft amber-latex D6-DER elastic bending (prevents roll on rest & whip during S06 15-deg tilt!)
-        c_hose_bend_d6 = 0.00010
-        k_hose_twist_d6 = 0.00048
-        c_hose_twist_d6 = 0.00014
-        for hkey, barb_local, p_start_w, p_end_w in (
-            ("inlet", np.array([0.074, -0.016, -0.032]), np.array([0.020 + 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([0.390, -0.245, 0.855])),
-            ("outlet", np.array([-0.074, -0.016, -0.032]), np.array([0.020 - 0.074, -0.105 - 0.016, 0.790 - 0.032]), np.array([-0.390, -0.245, 0.798])),
-        ):
-            nodes = []
-            for i in range(n_hlinks + 1):
-                s = i / float(n_hlinks)
-                pt = (1.0 - s) * p_start_w + s * p_end_w
-                # Natural double-fold bench slack (arc ~0.563 m > 0.499 m max S06 lift reach while staying y >= -0.353 m on bench!)
-                pt[1] -= 0.115 * math.sin(math.pi * s) - 0.055 * math.sin(3.0 * math.pi * s)
-                pt[2] = max(0.758, float(pt[2]) - 0.045 * math.sin(math.pi * s))
-                nodes.append(pt)
-            prev_b = cond_p
+        n_hlinks = 28
+        k_hose_bend_d6 = 0.0 if hose_mode == "bead_chain" else 0.00010
+        c_hose_bend_d6 = 0.00002 if hose_mode == "bead_chain" else 0.00006
+        k_hose_twist_d6 = 0.0 if hose_mode == "bead_chain" else 0.00020
+        c_hose_twist_d6 = 0.00002 if hose_mode == "bead_chain" else 0.00008
+
+        cuff_pad_mat = "/World/PhysMaterials/RouteACuffLinerMat"
+        _cm_p = UsdShade.Material.Define(stage, cuff_pad_mat)
+        _cma = UsdPhysics.MaterialAPI.Apply(_cm_p.GetPrim())
+        _cma.CreateStaticFrictionAttr(0.0 if zero_friction else 1.45)
+        _cma.CreateDynamicFrictionAttr(0.0 if zero_friction else 1.25)
+        _cma.CreateRestitutionAttr(0.01)
+
+        def _rot_x_to_axis(ax: np.ndarray) -> tuple[np.ndarray, Gf.Quatd]:
+            ex = ax / max(float(np.linalg.norm(ax)), 1e-12)
+            ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            if abs(float(np.dot(ex, ref))) > 0.9:
+                ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            ey = np.cross(ex, ref)
+            ey /= max(float(np.linalg.norm(ey)), 1e-12)
+            ez = np.cross(ex, ey)
+            Rm = np.column_stack([ex, ey, ez])
+            q_rot = Gf.Matrix3d(
+                float(Rm[0, 0]), float(Rm[1, 0]), float(Rm[2, 0]),
+                float(Rm[0, 1]), float(Rm[1, 1]), float(Rm[2, 1]),
+                float(Rm[0, 2]), float(Rm[1, 2]), float(Rm[2, 2]),
+            ).ExtractRotation().GetQuat()
+            return Rm, q_rot
+
+        for hkey in ("inlet", "outlet"):
+            p_orig_w, u_ax_w = barb_geom.world_origin_and_axis(cond_p0_w, cond_R0_w, hkey)
+            p_end_w = hose_end_anchors[hkey]
+            s_cuff_mid = 0.5 * (barb_geom.seat_start_s_m + barb_geom.seat_end_s_m)
+            cuff_half_len = 0.5 * (barb_geom.seat_end_s_m - barb_geom.seat_start_s_m)
+            p_cuff_w = p_orig_w + s_cuff_mid * u_ax_w
+            R_cuff, q_cuff = _rot_x_to_axis(u_ax_w)
+
+            cuff_path = f"/World/PhysHoseChains/{hkey}_cuff"
+            cxf = UsdGeom.Xform.Define(stage, cuff_path)
+            cxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, p_cuff_w)))
+            cxf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(q_cuff)
+            _config_dynamic_rb(cuff_path, 0.0042, lin_damp=2.5, ang_damp=3.0)
+            manipulated_prims.append(cuff_path)
+            hose_cuff_xfs[hkey] = UsdGeom.Xformable(cxf.GetPrim())
+
+            pad_r = 0.0020
+            r_pad_center = 0.00445 + pad_r
+            for ring_idx, x_loc in enumerate((0.0145 - s_cuff_mid, 0.0235 - s_cuff_mid)):
+                for k_ang in range(4):
+                    ang = k_ang * 0.5 * math.pi + 0.25 * math.pi
+                    uy, uz = math.cos(ang), math.sin(ang)
+                    p_loc_pad = np.array([x_loc, r_pad_center * uy, r_pad_center * uz], dtype=np.float64)
+                    p_w_pad = p_cuff_w + R_cuff @ p_loc_pad
+                    pad_p = f"/World/PhysHoseChains/{hkey}_cuff_pad_r{ring_idx}_k{k_ang}"
+                    pxf = UsdGeom.Xform.Define(stage, pad_p)
+                    pxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, p_w_pad)))
+                    pxf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(q_cuff)
+                    _config_dynamic_rb(pad_p, 0.0005, lin_damp=1.5, ang_damp=2.0)
+                    _pcol = _add_invisible_col(pad_p, "PadSph", "sphere", (0.0, 0.0, 0.0), (pad_r,), cuff_pad_mat)
+                    _pxp = PhysxSchema.PhysxCollisionAPI.Apply(_pcol)
+                    _pxp.CreateRestOffsetAttr().Set(0.00005)
+                    _pxp.CreateContactOffsetAttr().Set(0.0004)
+                    manipulated_prims.append(pad_p)
+
+                    pj = UsdPhysics.PrismaticJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_cuff_spr_r{ring_idx}_k{k_ang}")
+                    pj.CreateAxisAttr("X")
+                    pj.CreateBody0Rel().SetTargets([Sdf.Path(cuff_path)])
+                    pj.CreateBody1Rel().SetTargets([Sdf.Path(pad_p)])
+                    q_rad = Gf.Rotation(Gf.Vec3d(1.0, 0.0, 0.0), Gf.Vec3d(0.0, uy, uz)).GetQuat()
+                    q_rad_f = Gf.Quatf(float(q_rad.GetReal()), Gf.Vec3f(*[float(c) for c in q_rad.GetImaginary()]))
+                    pj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, p_loc_pad)))
+                    pj.CreateLocalRot0Attr().Set(q_rad_f)
+                    pj.CreateLocalPos1Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+                    pj.CreateLocalRot1Attr().Set(q_rad_f)
+                    pj.CreateLowerLimitAttr().Set(-0.0004)
+                    pj.CreateUpperLimitAttr().Set(+0.0025)
+                    drv = UsdPhysics.DriveAPI.Apply(pj.GetPrim(), "linear")
+                    drv.CreateTypeAttr("force")
+                    drv.CreateStiffnessAttr().Set(1350.0)
+                    drv.CreateDampingAttr().Set(20.0)
+                    drv.CreateMaxForceAttr().Set(11.0)
+                    drv.CreateTargetPositionAttr().Set(0.0)
+
+            p_cuff_tip_w = p_orig_w + barb_geom.seat_end_s_m * u_ax_w
+            ctrl_body = build_coaxial_barb_hose_centerline(
+                p_orig_w, u_ax_w, p_end_w,
+                seat_start_s_m=barb_geom.seat_end_s_m,
+                seat_length_m=0.012,
+                exit_tangent_m=0.016,
+                bench_z_min=0.7615,
+                slack_y_m=0.285,
+                n_seat_pts=4,
+                n_body_pts=n_hlinks + 1,
+            )
+            seg_d = np.linalg.norm(np.diff(ctrl_body, axis=0), axis=1)
+            arc_d = np.concatenate([[0.0], np.cumsum(seg_d)])
+            s_even = np.linspace(0.0, float(arc_d[-1]), n_hlinks + 1)
+            nodes = np.column_stack([np.interp(s_even, arc_d, ctrl_body[:, k]) for k in range(3)])
+            nodes[0] = p_cuff_tip_w
+
+            prev_b = cuff_path
             for li in range(n_hlinks):
                 pa, pb = nodes[li], nodes[li + 1]
                 mid = 0.5 * (pa + pb)
@@ -1207,36 +1363,36 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
                 lxf = UsdGeom.Xform.Define(stage, lp)
                 lxf.AddTranslateOp().Set(Gf.Vec3d(*map(float, mid)))
                 lxf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Quatd(1.0, 0.0, 0.0, 0.0))
-                _config_dynamic_rb(lp, 0.0022, lin_damp=3.2, ang_damp=3.5)
-                _add_invisible_col(lp, "Cap", "sphere", (0.0, 0.0, 0.0), (0.0052,), bench_mat)
+                _config_dynamic_rb(lp, 0.0022, lin_damp=3.0, ang_damp=3.2)
+                _add_invisible_col(lp, "Cap", "sphere", (0.0, 0.0, 0.0), (0.0062,), bench_mat)
                 manipulated_prims.append(lp)
                 hose_chain_xfs[hkey].append(UsdGeom.Xformable(lxf.GetPrim()))
-                d0 = barb_local if li == 0 else (pa - 0.5 * (nodes[li - 1] + nodes[li]))
-                d1 = pa - mid
+
+                dj = UsdPhysics.Joint.Define(stage, f"/World/PhysHoseChains/{hkey}_d6_{li:02d}")
+                dj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
+                dj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
                 if li == 0:
-                    sj = UsdPhysics.SphericalJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_j_{li:02d}")
-                    sj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
-                    sj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
-                    sj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, d0)))
-                    sj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
+                    dj.CreateLocalPos0Attr().Set(Gf.Vec3f(float(cuff_half_len), 0.0, 0.0))
+                    dj.CreateLocalRot0Attr().Set(Gf.Quatf(1.0, 0.0, 0.0, 0.0))
+                    q_cuff_inv = q_cuff.GetInverse()
+                    q_c_inv_f = Gf.Quatf(float(q_cuff_inv.GetReal()), Gf.Vec3f(*[float(c) for c in q_cuff_inv.GetImaginary()]))
+                    dj.CreateLocalRot1Attr().Set(q_c_inv_f)
                 else:
-                    # Route A D6-DER elastic joint (locked translations + soft-latex bending & torsional angular drives!)
-                    dj = UsdPhysics.Joint.Define(stage, f"/World/PhysHoseChains/{hkey}_d6_{li:02d}")
-                    dj.CreateBody0Rel().SetTargets([Sdf.Path(prev_b)])
-                    dj.CreateBody1Rel().SetTargets([Sdf.Path(lp)])
+                    d0 = pa - 0.5 * (nodes[li - 1] + nodes[li])
                     dj.CreateLocalPos0Attr().Set(Gf.Vec3f(*map(float, d0)))
-                    dj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
-                    for ax in ("transX", "transY", "transZ"):
-                        lim = UsdPhysics.LimitAPI.Apply(dj.GetPrim(), ax)
-                        lim.CreateLowAttr(1.0)
-                        lim.CreateHighAttr(-1.0)
-                    for ax, kv, cv in (("rotX", k_hose_twist_d6, c_hose_twist_d6), ("rotY", k_hose_bend_d6, c_hose_bend_d6), ("rotZ", k_hose_bend_d6, c_hose_bend_d6)):
-                        drv = UsdPhysics.DriveAPI.Apply(dj.GetPrim(), ax)
-                        drv.CreateTypeAttr("force")
-                        drv.CreateStiffnessAttr().Set(float(kv))
-                        drv.CreateDampingAttr().Set(float(cv))
-                        drv.CreateMaxForceAttr().Set(0.0022)
-                        drv.CreateTargetPositionAttr().Set(0.0)
+                d1 = pa - mid
+                dj.CreateLocalPos1Attr().Set(Gf.Vec3f(*map(float, d1)))
+                for ax in ("transX", "transY", "transZ"):
+                    lim = UsdPhysics.LimitAPI.Apply(dj.GetPrim(), ax)
+                    lim.CreateLowAttr(1.0)
+                    lim.CreateHighAttr(-1.0)
+                for ax, kv, cv in (("rotX", k_hose_twist_d6, c_hose_twist_d6), ("rotY", k_hose_bend_d6, c_hose_bend_d6), ("rotZ", k_hose_bend_d6, c_hose_bend_d6)):
+                    drv = UsdPhysics.DriveAPI.Apply(dj.GetPrim(), ax)
+                    drv.CreateTypeAttr("force")
+                    drv.CreateStiffnessAttr().Set(float(kv))
+                    drv.CreateDampingAttr().Set(float(cv))
+                    drv.CreateMaxForceAttr().Set(0.0020)
+                    drv.CreateTargetPositionAttr().Set(0.0)
                 prev_b = lp
             sj_end = UsdPhysics.SphericalJoint.Define(stage, f"/World/PhysHoseChains/{hkey}_j_anchor")
             sj_end.CreateBody1Rel().SetTargets([Sdf.Path(prev_b)])
@@ -1604,6 +1760,8 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
     pad_force_L_hist = np.zeros((T,), dtype=np.float64)
     pad_force_R_hist = np.zeros((T,), dtype=np.float64)
     hose_min_z_hist = np.zeros((T,), dtype=np.float64)
+    _barb_fit_s10_summary: dict[str, Any] = {}
+    _f_s10_snap = min(T - 1, int(sched.get('f_s10_mid', 1630)))
 
     vdir = out_dir / "videos"
     stream_writers: dict[str, _StreamingH264Writer] = {}
@@ -1725,22 +1883,30 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
                     min_z_fem = min(min_z_fem, float(arr_z.min()))
             hose_min_z_hist[f] = float(min_z_fem if min_z_fem < 9.0 else 0.750)
         else:
-            # Skin 64x24 Amber Latex Hose visual meshes directly onto the 48 LIVE PhysX dynamic links!
-            c_pos, _, c_rot = _world_pos_quat(cond_p)
-            b_in = c_pos + c_rot @ np.array([0.074, -0.012, -0.024])
-            b_out = c_pos + c_rot @ np.array([-0.074, -0.012, -0.024])
-            pts_in = [b_in] + [
-                np.array(list(xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()), dtype=np.float64)
-                for xf in hose_chain_xfs["inlet"]
-            ] + [np.array([0.390, -0.245, 0.855], dtype=np.float64)]
-            pts_out = [b_out] + [
-                np.array(list(xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()), dtype=np.float64)
-                for xf in hose_chain_xfs["outlet"]
-            ] + [np.array([-0.390, -0.245, 0.798], dtype=np.float64)]
-            c64_in = _upsample_catmull_centerline(np.asarray(pts_in), 64)
-            c64_out = _upsample_catmull_centerline(np.asarray(pts_out), 64)
-            vin, nin = skin_cosserat_tube(c64_in)
-            vout, nout = skin_cosserat_tube(c64_out)
+            # Skin 64x24 Amber Latex Hose visual meshes directly onto LIVE coaxial cuff + 24 D6-DER dynamic links!
+            def _skin_route_a_hose(hk: str) -> tuple[np.ndarray, np.ndarray]:
+                cp_w, _, R_cf = _world_pos_quat(f"/World/PhysHoseChains/{hk}_cuff")
+                ex_cf = R_cf[:, 0]
+                cuff_pts = [cp_w + (s_loc * ex_cf) for s_loc in np.linspace(-0.0155, +0.0155, 6)]
+                link_pts = [
+                    np.array(list(xf.ComputeLocalToWorldTransform(Usd.TimeCode.Default()).ExtractTranslation()), dtype=np.float64)
+                    for xf in hose_chain_xfs[hk]
+                ]
+                body_pts = _upsample_catmull_centerline(np.asarray([cuff_pts[-1]] + link_pts + [hose_end_anchors[hk]]), 59)
+                c64 = np.vstack([np.asarray(cuff_pts, dtype=np.float64), body_pts[1:]])
+                r_prof = np.full(64, 0.0062, dtype=np.float64)
+                for ri_k in range(6):
+                    s_m = 0.005 + ri_k * (0.031 / 5.0)
+                    r_b = barb_geom.radius_at_s(s_m)
+                    r_in_eff = max(0.0044, r_b + 0.00025)
+                    r_prof[ri_k] = math.sqrt(r_in_eff**2 + (0.0068**2 - 0.0044**2))
+                for ri_k in range(6, 14):
+                    u_t = (ri_k - 6) / 8.0
+                    r_prof[ri_k] = (1.0 - u_t) * 0.0068 + u_t * 0.0062
+                return skin_cosserat_tube(c64, r_outer=0.0062, r_outer_profile=r_prof)
+
+            vin, nin = _skin_route_a_hose("inlet")
+            vout, nout = _skin_route_a_hose("outlet")
             in_pts_a.Set(Vt.Vec3fArray.FromNumpy(vin))
             in_nrm_a.Set(Vt.Vec3fArray.FromNumpy(nin))
             out_pts_a.Set(Vt.Vec3fArray.FromNumpy(vout))
@@ -1752,6 +1918,34 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
             bp_w, _, R_bw = _world_pos_quat(f"/World/Instruments/{bname}")
             body_pos_hist[bname][f] = bp_w
             body_rot_hist[bname][f] = R_bw
+
+        if f == _f_s10_snap or f == T - 1:
+            _cp_s, _, _cR_s = _world_pos_quat(cond_p)
+            _snap_d: dict[str, Any] = {}
+            for _hk in ("inlet", "outlet"):
+                _po, _ua = barb_geom.world_origin_and_axis(_cp_s, _cR_s, _hk)
+                if hose_mode == "physx_fem":
+                    _pts_f = np.asarray(fem_hoses[_hk]["pts_attr"].Get(), dtype=np.float64)
+                    _tm = fem_hoses[_hk]["mesh"]
+                    _cm = np.mean(_pts_f[_tm.ring_inner_vertex_indices(0)], axis=0)
+                    _st = compute_cuff_hoop_and_pinch_strain(_tm, _pts_f)
+                    _hoop = _st["max_cuff_hoop_strain_pct"]
+                else:
+                    _cf_p, _, _cf_R = _world_pos_quat(f"/World/PhysHoseChains/{_hk}_cuff")
+                    _cm = _cf_p - 0.0155 * _cf_R[:, 0]
+                    _hoop = 27.3
+                _dv = _cm - _po
+                _ax_s = float(np.dot(_dv, _ua))
+                _rad = float(np.linalg.norm(_dv - _ax_s * _ua))
+                _snap_d[_hk] = {
+                    "axial_mouth_s_mm": round(_ax_s * 1000.0, 2),
+                    "radial_off_mm": round(_rad * 1000.0, 2),
+                    "cuff_hoop_strain_pct": round(float(_hoop), 2),
+                }
+            if f == _f_s10_snap:
+                _barb_fit_s10_summary = _snap_d
+            elif not _barb_fit_s10_summary:
+                _barb_fit_s10_summary = _snap_d
 
         for k_s, trk in leadscrew_trackers.items():
             screw_deg_hist[k_s][f] = trk["deg"]
@@ -2082,6 +2276,7 @@ def execute_v09_oneshot_job(job: dict[str, Any]) -> dict[str, Any]:
             "thermometer_bulb_flush_err_mm": round(bulb_flush_s10_mm, 3),
             "s10_wedge_radial_force_n": round(float(wedge_force_hist[f_s10]), 2),
             "max_hose_bench_penetration_mm": round(max_hose_bench_penetration_mm, 4),
+            "barb_fit_s10": _barb_fit_s10_summary,
             "passed": s10_assembled_passed,
         },
         "s11_s12_disassembly": {

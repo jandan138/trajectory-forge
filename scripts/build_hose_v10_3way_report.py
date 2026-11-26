@@ -18,6 +18,16 @@ from PIL import Image, ImageDraw, ImageFont
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_V10_DIR = _REPO_ROOT / "external_artifacts" / "hose_softbody_v10_3way"
 DEFAULT_REPORTS_DIR = _REPO_ROOT / "external_artifacts" / "reports"
+
+def _pick_font(size: int) -> Any:
+    for fp in (r"C:\Windows\Fonts\msyhbd.ttc", r"C:\Windows\Fonts\msyh.ttc", "/mnt/data/liuhangxu/garment/blender-4.5.2-linux-x64/4.5/datafiles/fonts/Noto Sans CJK Regular.woff2", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            if Path(fp).is_file():
+                return ImageFont.truetype(fp, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
 FFMPEG_DEFAULT = Path(r"G:\my_program\ffmpeg-2023-06-04-git-b1c3d81e71-full_build\bin\ffmpeg.exe")
 
 
@@ -78,8 +88,8 @@ def _compose_3way_mp4(
         stderr=subprocess.DEVNULL,
     )
     try:
-        f_hdr = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 20)
-        f_lbl = ImageFont.truetype(r"C:\Windows\Fonts\msyhbd.ttc", 15)
+        f_hdr = _pick_font(20)
+        f_lbl = _pick_font(15)
     except Exception:
         f_hdr = f_lbl = ImageFont.load_default()
 
@@ -295,6 +305,7 @@ def build_hose_v10_3way_report(
   <div class="card"><div class="card-hdr">3. Exp-3 机械臂真捏管套玻璃刺嘴 + 撒手悬吊自锁 + 拔管（零 FixedJoint）</div><video controls loop muted playsinline src="{_b64_uri(v_e3, 'video/mp4')}"></video></div>
   <div class="card"><div class="card-hdr">4. 反事实证伪（mu=0 零摩擦滑脱）&amp; 进水管误接上口（上进下出接反检出）</div><video controls loop muted playsinline src="{_b64_uri(v_cf, 'video/mp4')}"></video></div>
 </div></body></html>"""
+    out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(doc, encoding="utf-8")
     res = {
         "out_html": out_html.as_posix(),

@@ -1,0 +1,164 @@
+schema_version: "0.2"
+embodiment_id: "bimanual_fr3_wuji_hand"
+display_name: "Bimanual Franka FR3 + Wuji 20-DoF Dexterous Hand"
+robot_family: "generic_urdf"
+ik_backend: "pink_qp"
+urdf_path: "/cpfs/user/zhuzihou/dev/ConvertAsset/external_artifacts/cross_embodiment_robots_v1/bimanual_fr3_wuji_hand/bimanual_fr3_wuji_hand.urdf"
+usd_path: "/cpfs/user/zhuzihou/dev/ConvertAsset/external_artifacts/cross_embodiment_robots_v1/bimanual_fr3_wuji_hand/bimanual_fr3_wuji_hand.usd"
+base_pose_world:
+  position: [-0.46, 0.0, 0.0]
+  orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+
+# ADR-20261126 Hard Constraint: arm IK solves ONLY the 7-DoF arm wrist chains.
+# All 40 Wuji finger joints are locked during arm IK and controlled via Tier-1/Tier-2 EE API.
+kinematic_chains:
+  left_arm:
+    joint_names:
+      - left_arm_fr3_joint1
+      - left_arm_fr3_joint2
+      - left_arm_fr3_joint3
+      - left_arm_fr3_joint4
+      - left_arm_fr3_joint5
+      - left_arm_fr3_joint6
+      - left_arm_fr3_joint7
+    ee_link: "left_grasp_frame"
+    neutral_q: [0.0, -0.55, 0.0, -2.15, 0.0, 1.65, 0.785]
+  right_arm:
+    joint_names:
+      - right_arm_fr3_joint1
+      - right_arm_fr3_joint2
+      - right_arm_fr3_joint3
+      - right_arm_fr3_joint4
+      - right_arm_fr3_joint5
+      - right_arm_fr3_joint6
+      - right_arm_fr3_joint7
+    ee_link: "right_grasp_frame"
+    neutral_q: [0.0, -0.55, 0.0, -2.15, 0.0, 1.65, 0.785]
+
+end_effectors:
+  left_ee:
+    type: "dexterous_hand"
+    driver_joints:
+      - left_ee_left_finger1_joint1
+      - left_ee_left_finger1_joint2
+      - left_ee_left_finger1_joint3
+      - left_ee_left_finger1_joint4
+      - left_ee_left_finger2_joint1
+      - left_ee_left_finger2_joint2
+      - left_ee_left_finger2_joint3
+      - left_ee_left_finger2_joint4
+      - left_ee_left_finger3_joint1
+      - left_ee_left_finger3_joint2
+      - left_ee_left_finger3_joint3
+      - left_ee_left_finger3_joint4
+      - left_ee_left_finger4_joint1
+      - left_ee_left_finger4_joint2
+      - left_ee_left_finger4_joint3
+      - left_ee_left_finger4_joint4
+      - left_ee_left_finger5_joint1
+      - left_ee_left_finger5_joint2
+      - left_ee_left_finger5_joint3
+      - left_ee_left_finger5_joint4
+    postures:
+      open:
+        _default: 0.0
+      release:
+        _default: 0.0
+      cylinder_wrap:
+        left_ee_left_finger1_joint1: 1.05
+        left_ee_left_finger1_joint2: 0.65
+        left_ee_left_finger1_joint3: 0.95
+        left_ee_left_finger1_joint4: 0.85
+        _fingers_2_to_5_j1: 1.25
+        _fingers_2_to_5_j2: 0.0
+        _fingers_2_to_5_j3: 1.25
+        _fingers_2_to_5_j4: 1.05
+      cup_wrap:
+        left_ee_left_finger1_joint1: 0.95
+        left_ee_left_finger1_joint2: 0.55
+        left_ee_left_finger1_joint3: 0.85
+        left_ee_left_finger1_joint4: 0.75
+        _fingers_2_to_5_j1: 1.10
+        _fingers_2_to_5_j2: 0.0
+        _fingers_2_to_5_j3: 1.15
+        _fingers_2_to_5_j4: 0.95
+      pinch:
+        left_ee_left_finger1_joint1: 0.60
+        left_ee_left_finger1_joint2: 0.40
+        left_ee_left_finger1_joint3: 0.55
+        left_ee_left_finger2_joint1: 0.85
+        left_ee_left_finger2_joint3: 0.90
+        left_ee_left_finger2_joint4: 0.60
+      button_press:
+        left_ee_left_finger1_joint1: 0.65
+        left_ee_left_finger2_joint1: 0.05
+        left_ee_left_finger2_joint3: 0.05
+        left_ee_left_finger3_joint1: 1.15
+        left_ee_left_finger3_joint3: 1.15
+        left_ee_left_finger4_joint1: 1.15
+        left_ee_left_finger4_joint3: 1.15
+        left_ee_left_finger5_joint1: 1.15
+        left_ee_left_finger5_joint3: 1.15
+  right_ee:
+    type: "dexterous_hand"
+    driver_joints:
+      - right_ee_right_finger1_joint1
+      - right_ee_right_finger1_joint2
+      - right_ee_right_finger1_joint3
+      - right_ee_right_finger1_joint4
+      - right_ee_right_finger2_joint1
+      - right_ee_right_finger2_joint2
+      - right_ee_right_finger2_joint3
+      - right_ee_right_finger2_joint4
+      - right_ee_right_finger3_joint1
+      - right_ee_right_finger3_joint2
+      - right_ee_right_finger3_joint3
+      - right_ee_right_finger3_joint4
+      - right_ee_right_finger4_joint1
+      - right_ee_right_finger4_joint2
+      - right_ee_right_finger4_joint3
+      - right_ee_right_finger4_joint4
+      - right_ee_right_finger5_joint1
+      - right_ee_right_finger5_joint2
+      - right_ee_right_finger5_joint3
+      - right_ee_right_finger5_joint4
+    postures:
+      open:
+        _default: 0.0
+      release:
+        _default: 0.0
+      cylinder_wrap:
+        right_ee_right_finger1_joint1: 1.05
+        right_ee_right_finger1_joint2: 0.65
+        right_ee_right_finger1_joint3: 0.95
+        right_ee_right_finger1_joint4: 0.85
+        _fingers_2_to_5_j1: 1.25
+        _fingers_2_to_5_j2: 0.0
+        _fingers_2_to_5_j3: 1.25
+        _fingers_2_to_5_j4: 1.05
+      cup_wrap:
+        right_ee_right_finger1_joint1: 0.95
+        right_ee_right_finger1_joint2: 0.55
+        right_ee_right_finger1_joint3: 0.85
+        right_ee_right_finger1_joint4: 0.75
+        _fingers_2_to_5_j1: 1.10
+        _fingers_2_to_5_j2: 0.0
+        _fingers_2_to_5_j3: 1.15
+        _fingers_2_to_5_j4: 0.95
+      pinch:
+        right_ee_right_finger1_joint1: 0.60
+        right_ee_right_finger1_joint2: 0.40
+        right_ee_right_finger1_joint3: 0.55
+        right_ee_right_finger2_joint1: 0.85
+        right_ee_right_finger2_joint3: 0.90
+        right_ee_right_finger2_joint4: 0.60
+      button_press:
+        right_ee_right_finger1_joint1: 0.65
+        right_ee_right_finger2_joint1: 0.05
+        right_ee_right_finger2_joint3: 0.05
+        right_ee_right_finger3_joint1: 1.15
+        right_ee_right_finger3_joint3: 1.15
+        right_ee_right_finger4_joint1: 1.15
+        right_ee_right_finger4_joint3: 1.15
+        right_ee_right_finger5_joint1: 1.15
+        right_ee_right_finger5_joint3: 1.15

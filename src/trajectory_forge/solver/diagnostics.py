@@ -146,6 +146,9 @@ class AttemptFeedbackPacket:
     saved_snapshots: tuple[SnapshotHandle, ...] = ()
     state_summary: dict[str, Any] = field(default_factory=dict)
     media_paths: tuple[str, ...] = ()
+    ik_failures: tuple[dict[str, Any], ...] = ()
+    ee_contact_metrics: dict[str, Any] = field(default_factory=dict)
+    failure_keyframes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -219,6 +222,15 @@ def build_feedback_packet(
         saved_snapshots=result.saved_snapshots,
         state_summary=dict(result.state_summary),
         media_paths=tuple(m.relpath for m in result.media),
+        ik_failures=tuple(
+            x for x in (result.state_summary.get("ik_failures") or ()) if isinstance(x, dict)
+        ),
+        ee_contact_metrics=dict(result.state_summary.get("ee_contact_metrics") or {}),
+        failure_keyframes=tuple(
+            m.relpath
+            for m in result.media
+            if m.relpath.endswith((".png", ".jpg", ".jpeg"))
+        ),
     )
 
 
@@ -259,6 +271,14 @@ def render_repair_prompt_markdown(
         )
     if feedback.media_paths:
         lines.append(f"- **Media Artifacts**: `{list(feedback.media_paths)}`")
+    if feedback.ik_failures:
+        lines.append(f"- **IK Failures**: `{json.dumps(list(feedback.ik_failures)[:5], ensure_ascii=False)}`")
+    if feedback.ee_contact_metrics:
+        lines.append(
+            f"- **EE Contact & Residual Metrics**: `{json.dumps(feedback.ee_contact_metrics, ensure_ascii=False)}`"
+        )
+    if feedback.failure_keyframes:
+        lines.append(f"- **Failure Keyframes**: `{list(feedback.failure_keyframes)}`")
     if feedback.state_summary:
         lines.extend(
             [

@@ -1,0 +1,70 @@
+schema_version: "0.2"
+embodiment_id: "bimanual_fr3_robotiq85"
+display_name: "Bimanual Franka FR3 + Robotiq 2F-85"
+robot_family: "generic_urdf"
+ik_backend: "pink_qp"
+urdf_path: "/cpfs/user/zhuzihou/dev/ConvertAsset/external_artifacts/cross_embodiment_robots_v1/bimanual_fr3_robotiq85/bimanual_fr3_robotiq85.urdf"
+usd_path: "/cpfs/user/zhuzihou/dev/ConvertAsset/external_artifacts/cross_embodiment_robots_v1/bimanual_fr3_robotiq85/bimanual_fr3_robotiq85.usd"
+base_pose_world:
+  position: [-0.46, 0.0, 0.0]
+  orientation_wxyz: [1.0, 0.0, 0.0, 0.0]
+
+kinematic_chains:
+  left_arm:
+    joint_names:
+      - left_arm_fr3_joint1
+      - left_arm_fr3_joint2
+      - left_arm_fr3_joint3
+      - left_arm_fr3_joint4
+      - left_arm_fr3_joint5
+      - left_arm_fr3_joint6
+      - left_arm_fr3_joint7
+    ee_link: "left_grasp_frame"
+    neutral_q: [0.0, -0.55, 0.0, -2.15, 0.0, 1.65, 0.785]
+  right_arm:
+    joint_names:
+      - right_arm_fr3_joint1
+      - right_arm_fr3_joint2
+      - right_arm_fr3_joint3
+      - right_arm_fr3_joint4
+      - right_arm_fr3_joint5
+      - right_arm_fr3_joint6
+      - right_arm_fr3_joint7
+    ee_link: "right_grasp_frame"
+    neutral_q: [0.0, -0.55, 0.0, -2.15, 0.0, 1.65, 0.785]
+
+end_effectors:
+  left_ee:
+    type: "parallel_gripper"
+    driver_joints: ["left_ee_robotiq_85_left_knuckle_joint"]
+    all_joints:
+      - left_ee_robotiq_85_left_knuckle_joint
+      - left_ee_robotiq_85_right_knuckle_joint
+      - left_ee_robotiq_85_left_inner_knuckle_joint
+      - left_ee_robotiq_85_right_inner_knuckle_joint
+      - left_ee_robotiq_85_left_finger_tip_joint
+      - left_ee_robotiq_85_right_finger_tip_joint
+    postures:
+      open: {left_ee_robotiq_85_left_knuckle_joint: 0.0}
+      release: {left_ee_robotiq_85_left_knuckle_joint: 0.0}
+      cylinder_wrap: {left_ee_robotiq_85_left_knuckle_joint: 0.78}
+      cup_wrap: {left_ee_robotiq_85_left_knuckle_joint: 0.72}
+      pinch: {left_ee_robotiq_85_left_knuckle_joint: 0.80}
+      button_press: {left_ee_robotiq_85_left_knuckle_joint: 0.80}
+  right_ee:
+    type: "parallel_gripper"
+    driver_joints: ["right_ee_robotiq_85_left_knuckle_joint"]
+    all_joints:
+      - right_ee_robotiq_85_left_knuckle_joint
+      - right_ee_robotiq_85_right_knuckle_joint
+      - right_ee_robotiq_85_left_inner_knuckle_joint
+      - right_ee_robotiq_85_right_inner_knuckle_joint
+      - right_ee_robotiq_85_left_finger_tip_joint
+      - right_ee_robotiq_85_right_finger_tip_joint
+    postures:
+      open: {right_ee_robotiq_85_left_knuckle_joint: 0.0}
+      release: {right_ee_robotiq_85_left_knuckle_joint: 0.0}
+      cylinder_wrap: {right_ee_robotiq_85_left_knuckle_joint: 0.78}
+      cup_wrap: {right_ee_robotiq_85_left_knuckle_joint: 0.72}
+      pinch: {right_ee_robotiq_85_left_knuckle_joint: 0.80}
+      button_press: {right_ee_robotiq_85_left_knuckle_joint: 0.80}

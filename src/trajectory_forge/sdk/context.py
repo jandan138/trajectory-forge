@@ -333,6 +333,16 @@ class KinematicsAPI:
             chain, tuple(float(v) for v in joint_positions), steps=steps
         )
 
+    def set_chain_joint_targets(
+        self,
+        chain: str,
+        joint_positions: Sequence[float],
+        *,
+        steps: int = 20,
+    ) -> tuple[float, ...]:
+        """Tier-2 EFE escape hatch: directly command joint targets for an arm chain."""
+        return self.move_joints(chain, joint_positions, steps=steps)
+
     def move_base_world(
         self,
         dx_m: float,
@@ -424,6 +434,8 @@ class EndEffectorAPI:
         posture_name: str,
         control_mode: str = "position",
         *,
+        closure: float | None = None,
+        max_effort: float | None = None,
         steps: int = 16,
     ) -> tuple[float, ...]:
         if group not in self._embodiment.actuator_groups:
@@ -435,9 +447,57 @@ class EndEffectorAPI:
             )
         if posture_name not in grp.named_postures:
             raise KeyError(f"Actuator group {group!r} has no posture {posture_name!r}")
-        targets = grp.named_postures[posture_name]
+        targets = tuple(float(v) for v in grp.named_postures[posture_name])
+        if closure is not None and "open" in grp.named_postures and posture_name != "open":
+            alpha = max(0.0, min(1.0, float(closure)))
+            open_t = tuple(float(v) for v in grp.named_postures["open"])
+            if len(open_t) == len(targets):
+                targets = tuple(
+                    o + (t - o) * alpha for o, t in zip(open_t, targets)
+                )
+        _ = max_effort  # Reserved for backend effort-capped drive dispatch
         self._backend.command_actuator(group, targets, control_mode=control_mode, steps=steps)
         return targets
+
+    def set_joint_targets(
+        self,
+        group: str,
+        joint_targets: dict[str, float],
+        control_mode: str = "position",
+        *,
+        steps: int = 16,
+    ) -> tuple[float, ...]:
+        """Tier-2 EFE escape hatch: command individual finger/gripper joints by name."""
+        if group not in self._embodiment.actuator_groups:
+            raise KeyError(f"Unknown actuator group: {group!r}")
+        grp = self._embodiment.actuator_groups[group]
+        if control_mode not in grp.control_modes:
+            raise ContractValidationError(
+                f"Actuator group {group!r} does not support mode {control_mode!r}"
+            )
+        base_q = list(self._backend.current_proprio())
+        vec = [
+            float(base_q[idx]) if 0 <= idx < len(base_q) else 0.0
+            for idx in grp.dof_indices
+        ]
+        joint_names = tuple(getattr(grp, "joint_names", ()) or ())
+        name_to_local = {name: i for i, name in enumerate(joint_names)}
+        for jname, jval in joint_targets.items():
+            if jname in name_to_local:
+                vec[name_to_local[jname]] = float(jval)
+            else:
+                # Allow suffix matching (e.g. "thumb_mcp" or "finger1_joint1")
+                matched = [i for n, i in name_to_local.items() if n.endswith(jname)]
+                if len(matched) == 1:
+                    vec[matched[0]] = float(jval)
+                else:
+                    raise KeyError(
+                        f"Joint {jname!r} not found in actuator group {group!r} "
+                        f"(available: {list(joint_names)[:6]}...)"
+                    )
+        out = tuple(vec)
+        self._backend.command_actuator(group, out, control_mode=control_mode, steps=steps)
+        return out
 
     def command_targets(
         self,

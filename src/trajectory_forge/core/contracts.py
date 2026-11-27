@@ -370,6 +370,7 @@ class KinematicChainSpec:
     ee_frame: str
     dof_indices: tuple[int, ...]
     joint_names: tuple[str, ...]
+    neutral_q: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.dof_indices:
@@ -390,6 +391,7 @@ class KinematicChainSpec:
             ee_frame=str(data["ee_frame"]),
             dof_indices=tuple(int(i) for i in data["dof_indices"]),
             joint_names=tuple(str(n) for n in data["joint_names"]),
+            neutral_q=tuple(float(v) for v in data.get("neutral_q", ())),
         )
 
 
@@ -512,6 +514,7 @@ class EmbodimentCard:
     base_locked: bool = False
     schema_version: str = "trajectory-forge-embodiment-card/v0.1"
     notes: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.action_dim <= 0:

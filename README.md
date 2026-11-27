@@ -25,12 +25,14 @@ embodied-eval-os
 
 ## Key Architectural Principles
 
-1. **Pure-Layer Isolation**: `core`, `intake`, `embodiment`, `sdk`, `worker`, and `trajectory` never import simulator, physics, or ML SDKs (`pxr`, `omni`, `isaacsim`, `genmanip`, `curobo`, `mujoco`, `torch`). Simulator execution is isolated under `src/trajectory_forge/adapters/`.
-2. **Agent Python Controller SDK**: Instead of rigid parallel-gripper primitives, agents author full Python `def solve(ctx):` scripts backed by `world`, `kinematics`, `end_effector`, `sensors`, and `checkpoint`.
+1. **Microkernel v2 & Pure-Layer Isolation**: `core`, `intake`, `embodiment`, `sdk`, `verifier`, `producers`, `worker`, `solver`, and `trajectory` never import simulator, physics, IK, or ML SDKs (`pxr`, `omni`, `isaacsim`, `genmanip`, `curobo`, `pinocchio`, `pink`, `mujoco`, `newton`, `warp`, `torch`). All simulator & IK execution is isolated under `src/trajectory_forge/adapters/` (with historical deformable/distillation experiments cleanly archived in `adapters/legacy/`).
+2. **Dual-Side Plugin Architecture**:
+   - **Upper Plugins (`producers/`)**: Peer trajectory generation paradigms (`code_to_control`, `direct_control`, `rl_policy`, plus future world-model / VLA bootstrap / differentiable physics) all deliver a closed-loop `ExecutablePolicy` (`PythonControllerPolicy`, `WaypointPolicy`, `CheckpointPolicy`, or `CompositePolicy`).
+   - **Lower Plugins (`adapters/`)**: Simulator adapters declare explicit `SimCapability` sets (`isaac_genmanip` for single-env Isaac Sim 4.1 + Pink/CuRobo; `newton` for native Warp multi-world `VEC_ENV` + `DIFF_PHYSICS`), decoupled via registry-driven `intake/registry.py` (`genmanip_package` & `usd_direct`).
 3. **Cross-Embodiment & Tactile Reservation**: `EmbodimentCard` (`trajectory-forge-embodiment-card/v0.1`) abstracts kinematic chains, multi-DOF actuator groups (`parallel_gripper`, `dexterous_hand` with `position | velocity | effort | impedance`), and extensible sensor channels (`proprio`, `wrench`, `tactile_summary`, `tactile_array`, `rgb`, `depth`).
-4. **Privileged-to-Sensorimotor Firewall**:
-   - `privileged_search` permits stage snapshot save/restore (`ctx.checkpoint`).
-   - `full_horizon_gate` and `trajectory_synthesis` strictly forbid snapshot resumption (`FirewallViolationError`) and enforce `continuous_from_t0=True`, `privileged_channels_recorded=False` on exported manifests.
+4. **Privileged-to-Sensorimotor Firewall (`verifier/gate.py`)**:
+   - `privileged_search` permits stage snapshot save/restore (`ctx.checkpoint` / `DirectControlSession`).
+   - `FullHorizonGate` strictly forbids snapshot resumption (`FirewallViolationError`) across multi-seed `t=0` rollouts and enforces `continuous_from_t0=True`, `privileged_channels_recorded=False` on all exported `.npz` trajectories.
 5. **Cloud Brain / Local 4090 Worker Split**: Cloud agent orchestration, brief parsing, AST safety checks, and `<50 ms` `DryRunSimBackend` preflight run cleanly in Google AI Ultra workspaces; heavy Isaac Sim 4.1 RTX/PhysX rollouts execute on a remote GPU worker via `/v1/rollout`.
 
 ## Quick Start

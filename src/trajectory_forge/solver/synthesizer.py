@@ -11,7 +11,7 @@ from trajectory_forge.core.contracts import (
     EmbodimentCard,
     ScenarioIntakeBrief,
 )
-from trajectory_forge.intake.genmanip_intake import render_agent_brief_markdown
+from trajectory_forge.intake.registry import render_agent_brief_markdown
 from trajectory_forge.solver.diagnostics import (
     AttemptFeedbackPacket,
     render_repair_prompt_markdown,

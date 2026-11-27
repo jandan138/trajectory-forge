@@ -13,7 +13,7 @@ from trajectory_forge.core.contracts import (
     SnapshotHandle,
     SolvabilityDiagnostics,
 )
-from trajectory_forge.intake.genmanip_intake import render_agent_brief_markdown
+from trajectory_forge.intake.registry import render_agent_brief_markdown
 
 
 _PHYSICS_FAILURE_CATEGORIES: dict[str, str] = {

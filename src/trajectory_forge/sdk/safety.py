@@ -32,18 +32,18 @@ FORBIDDEN_CALL_NAMES: frozenset[str] = frozenset(
 ALLOWED_IMPORT_ROOTS: frozenset[str] = frozenset({"math", "numpy", "trajectory_forge", "typing"})
 
 
-def validate_controller_source(code: str) -> None:
+def validate_controller_source(code: str, *, required_fn: str = "solve") -> None:
     """Validate an agent-authored Python controller script via AST inspection."""
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
         raise ControllerSafetyError(f"Controller syntax error: {exc}") from exc
 
-    has_solve_fn = False
+    has_entry_fn = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "solve":
+        if isinstance(node, ast.FunctionDef) and node.name == required_fn:
             if len(node.args.args) >= 1:
-                has_solve_fn = True
+                has_entry_fn = True
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
@@ -68,5 +68,5 @@ def validate_controller_source(code: str) -> None:
                     f"Disallowed attribute call in controller: {node.func.attr!r}"
                 )
 
-    if not has_solve_fn:
-        raise ControllerSafetyError("Controller must define top-level `def solve(ctx):`")
+    if not has_entry_fn:
+        raise ControllerSafetyError(f"Controller must define top-level `def {required_fn}(...):`")

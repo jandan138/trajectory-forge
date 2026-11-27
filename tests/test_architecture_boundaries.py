@@ -13,6 +13,8 @@ PURE_MODULE_ROOTS = (
     REPO_ROOT / "src" / "trajectory_forge" / "worker",
     REPO_ROOT / "src" / "trajectory_forge" / "trajectory",
     REPO_ROOT / "src" / "trajectory_forge" / "solver",
+    REPO_ROOT / "src" / "trajectory_forge" / "verifier",
+    REPO_ROOT / "src" / "trajectory_forge" / "producers",
 )
 FORBIDDEN_IMPORT_MARKERS = (
     "import pxr",
@@ -25,6 +27,10 @@ FORBIDDEN_IMPORT_MARKERS = (
     "from genmanip",
     "import curobo",
     "from curobo",
+    "import pinocchio",
+    "from pinocchio",
+    "import pink",
+    "from pink",
     "import mujoco",
     "from mujoco",
     "import torch",

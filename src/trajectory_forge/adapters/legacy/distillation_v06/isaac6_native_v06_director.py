@@ -7,12 +7,12 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from trajectory_forge.adapters.distillation_v06.cosserat_hose_solver_v06 import (
+from trajectory_forge.adapters.legacy.distillation_v06.cosserat_hose_solver_v06 import (
     quat_wxyz_rot,
     skin_cosserat_tube,
     solve_cosserat_catenary_centerline,
 )
-from trajectory_forge.adapters.distillation_v06.mesh_penetration_gate_v06 import (
+from trajectory_forge.adapters.legacy.distillation_v06.mesh_penetration_gate_v06 import (
     audit_v06_trajectory_geometry,
     panda_all_link_world_positions,
 )

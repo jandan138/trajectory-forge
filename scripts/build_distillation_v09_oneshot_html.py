@@ -194,7 +194,7 @@ def build_v09_oneshot_html(
     triple_uri = _b64_uri(Path(nom["videos"]["triple_sync_uncut_v09"]), "video/mp4")
     cf_uri = _b64_uri(Path(cf["videos"]["triple_sync_uncut_v09"]), "video/mp4") if cf.get("videos", {}).get("triple_sync_uncut_v09") else ""
 
-    from trajectory_forge.adapters.distillation_v09.v09_s01_s12_schedule_planner import synthesize_v09_s01_s12_schedule
+    from trajectory_forge.adapters.legacy.distillation_v09.v09_s01_s12_schedule_planner import synthesize_v09_s01_s12_schedule
 
     bL = np.asarray(spec["robot_bases"]["franka_left"]["xyz"], dtype=np.float64)
     qL = np.asarray(spec["robot_bases"]["franka_left"]["wxyz"], dtype=np.float64)

@@ -11,7 +11,7 @@ from typing import Any
 from convert_asset.deformable_v08_hermite import EvidenceTierV08
 from embodied_eval_os.core.reports.deformable_v08_router import certify_v08_rollout_dir
 from scenario_forge.adapters.deformable_v08 import build_all_v08_ab_packages
-from trajectory_forge.adapters.deformable_workers_v08 import (
+from trajectory_forge.adapters.legacy.deformable_workers_v08 import (
     render_dual_renderer_comparison_video,
     render_task_ab_comparison_video,
     run_all_v08_ab_experiments,

@@ -10,7 +10,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from trajectory_forge.adapters.hose_softbody_v10 import run_full_3way_hose_v10_suite
+from trajectory_forge.adapters.legacy.hose_softbody_v10 import run_full_3way_hose_v10_suite
 
 
 def main() -> None:

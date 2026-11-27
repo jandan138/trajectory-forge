@@ -19,7 +19,7 @@ for _p in (str(_SRC_ROOT), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from trajectory_forge.adapters.deformable_workers.common import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.common import (  # noqa: E402
     apply_low_priority_process_policy,
     build_voxel_tet_grid,
     compute_damage_score,

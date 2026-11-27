@@ -606,7 +606,7 @@ def _render_rtx_showcase(
                 mat_rough = 0.42
                 mid_k = min(132, len(pts_seq) - 2)
                 step_strains = [float(0.0)] * len(pts_seq)
-                from trajectory_forge.adapters.deformable_workers.common import compute_tet_strains_from_points
+                from trajectory_forge.adapters.legacy.deformable_workers.common import compute_tet_strains_from_points
                 with np.load(npz_path, allow_pickle=False) as z:
                     tets_arr = np.asarray(z["deformable_elements"], dtype=np.int64)
                 for ti in range(len(pts_seq)):
@@ -617,7 +617,7 @@ def _render_rtx_showcase(
                 mat_rough = 0.68
                 mid_k = min(104, len(pts_seq) - 2)
                 step_strains = [float(0.0)] * len(pts_seq)
-                from trajectory_forge.adapters.deformable_workers.common import compute_edge_stretch_from_points
+                from trajectory_forge.adapters.legacy.deformable_workers.common import compute_edge_stretch_from_points
                 with np.load(npz_path, allow_pickle=False) as z:
                     edges_arr = np.asarray(z["deformable_elements"], dtype=np.int64)
                 for ti in range(len(pts_seq)):

@@ -14,7 +14,7 @@ for _p in (str(_SRC_ROOT), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from trajectory_forge.adapters.deformable_workers.runner import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.runner import (  # noqa: E402
     ENGINE_ORDER,
     run_deformable_batch_serialized,
 )

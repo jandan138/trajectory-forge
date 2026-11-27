@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from trajectory_forge.adapters.distillation_workers_v04.common_v04 import (
+from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import (
     ARM_BASE_QUAT_WXYZ,
     LEFT_ARM_BASE_POS,
     RIGHT_ARM_BASE_POS,

@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from trajectory_forge.adapters.deformable_workers.common import (
+from trajectory_forge.adapters.legacy.deformable_workers.common import (
     apply_low_priority_process_policy,
     compute_damage_score,
     compute_edge_stretch_from_points,

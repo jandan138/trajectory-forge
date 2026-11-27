@@ -16,7 +16,7 @@ SUMMARY_JSON = REPO_ROOT / "external_artifacts" / "distillation_v09_oneshot" / "
 
 
 def test_v09_cpu_schedule_ik_and_clearance_gate() -> None:
-    from trajectory_forge.adapters.distillation_v09.v09_s01_s12_schedule_planner import (
+    from trajectory_forge.adapters.legacy.distillation_v09.v09_s01_s12_schedule_planner import (
         audit_v09_schedule_cpu,
         synthesize_v09_s01_s12_schedule,
     )

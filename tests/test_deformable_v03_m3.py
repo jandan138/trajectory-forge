@@ -11,7 +11,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from trajectory_forge.adapters.deformable_workers_v03.common_v03 import V03_TASKS  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers_v03.common_v03 import V03_TASKS  # noqa: E402
 from trajectory_forge.intake.deformable_v02_intake import load_deformable_v02_package  # noqa: E402
 from trajectory_forge.skills.deformable_primitives_v03 import make_v03_controller  # noqa: E402
 

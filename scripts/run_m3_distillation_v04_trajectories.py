@@ -14,8 +14,8 @@ for _p in (str(_SRC_ROOT), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from trajectory_forge.adapters.distillation_workers_v04.common_v04 import V04_TASKS  # noqa: E402
-from trajectory_forge.adapters.distillation_workers_v04.runner_v04 import run_v04_engine_batch  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import V04_TASKS  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_workers_v04.runner_v04 import run_v04_engine_batch  # noqa: E402
 
 
 DEFAULT_PACKAGES_ROOT = Path(

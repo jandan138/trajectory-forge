@@ -12,7 +12,7 @@ import numpy as np
 
 from embodied_eval_os.core.reports.deformable_v08_router import certify_v08_rollout_dir
 from scenario_forge.adapters.deformable_v08 import build_v08_ab_scenario_package
-from trajectory_forge.adapters.deformable_workers_v08 import (
+from trajectory_forge.adapters.legacy.deformable_workers_v08 import (
     render_dual_renderer_comparison_video,
     render_task_ab_comparison_video,
     run_single_v08_ab_task,

@@ -193,7 +193,7 @@ def _decorate_hud(
 
 def run_plan_and_optional_isaac(pkg_root: Path, out_dir: Path, *, plan_only: bool = False) -> dict[str, Any]:
     import numpy as np
-    from trajectory_forge.adapters.distillation_v06.isaac6_native_v06_director import (
+    from trajectory_forge.adapters.legacy.distillation_v06.isaac6_native_v06_director import (
         synthesize_v06_12stage_closed_loop_plan,
     )
 

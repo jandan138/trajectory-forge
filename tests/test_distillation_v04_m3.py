@@ -11,7 +11,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from trajectory_forge.adapters.distillation_workers_v04.common_v04 import (  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import (  # noqa: E402
     V04_TASKS,
     load_v04_task_context,
 )

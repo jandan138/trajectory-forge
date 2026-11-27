@@ -10,14 +10,14 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import yaml
 
-from trajectory_forge.adapters.deformable_workers.common import (
+from trajectory_forge.adapters.legacy.deformable_workers.common import (
     apply_low_priority_process_policy,
     compute_damage_score,
     compute_tet_strains_from_F,
     compute_tet_strains_from_points,
     jitter_for_seed,
 )
-from trajectory_forge.adapters.deformable_workers_v03.common_v03 import orient_tets_positive
+from trajectory_forge.adapters.legacy.deformable_workers_v03.common_v03 import orient_tets_positive
 from trajectory_forge.core.contracts import ScenarioIntakeBrief
 from trajectory_forge.intake.deformable_v02_intake import load_deformable_v02_package
 from trajectory_forge.sdk.panda_kinematics import panda_pad_world_poses

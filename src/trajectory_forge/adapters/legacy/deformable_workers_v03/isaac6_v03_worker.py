@@ -19,19 +19,19 @@ _SRC_ROOT = str(Path(__file__).resolve().parents[3])
 if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
-from trajectory_forge.adapters.deformable_workers.common import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.common import (  # noqa: E402
     apply_low_priority_process_policy,
     jitter_for_seed,
     save_episode_bundle,
 )
-from trajectory_forge.adapters.deformable_workers.isaac6_rollout_worker import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.isaac6_rollout_worker import (  # noqa: E402
     _apply_small_collision_offsets,
     _create_kinematic_box,
     _create_rigid_material,
     _create_static_box,
     _pad_particle_normal_force,
 )
-from trajectory_forge.adapters.deformable_workers_v03.common_v03 import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers_v03.common_v03 import (  # noqa: E402
     evaluate_v03_task_outcome,
     load_v03_proxy_and_brief,
     orient_tets_positive,

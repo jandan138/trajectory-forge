@@ -17,7 +17,7 @@ import tempfile
 import time
 from typing import Any
 
-from trajectory_forge.adapters.deformable_workers_v03.runner_v03 import (
+from trajectory_forge.adapters.legacy.deformable_workers_v03.runner_v03 import (
     ENGINE_EXECUTABLES,
     WORKER_SCRIPTS,
 )

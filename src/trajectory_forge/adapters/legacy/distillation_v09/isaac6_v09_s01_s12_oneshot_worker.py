@@ -43,8 +43,8 @@ _SRC_ROOT = str(Path(__file__).resolve().parents[3])
 if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
-from trajectory_forge.adapters.distillation_v06.cosserat_hose_solver_v06 import skin_cosserat_tube  # noqa: E402
-from trajectory_forge.adapters.distillation_v09.v09_s01_s12_schedule_planner import (  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_v06.cosserat_hose_solver_v06 import skin_cosserat_tube  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_v09.v09_s01_s12_schedule_planner import (  # noqa: E402
     COND_LOWER_CONE_W,
     COND_SEATED_CENTER_W,
     HEAD_SIDEARM_CONE_W,

@@ -12,7 +12,7 @@ _SRC_ROOT = _REPO_ROOT / "src"
 if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
-from trajectory_forge.adapters.distillation_v09.cold_start_runner_v09 import run_cold_start_v09_episode  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_v09.cold_start_runner_v09 import run_cold_start_v09_episode  # noqa: E402
 
 
 DEFAULT_PKG_DIR = Path(

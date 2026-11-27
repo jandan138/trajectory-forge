@@ -13,7 +13,7 @@ from examples.controllers.deformable_v02 import (
     OfficeClothTearController,
     OfficeClothWipeGentleController,
 )
-from trajectory_forge.adapters.deformable_workers.common import (
+from trajectory_forge.adapters.legacy.deformable_workers.common import (
     build_voxel_tet_grid,
     compute_damage_score,
     compute_edge_stretch_from_points,
@@ -162,7 +162,7 @@ def test_continuum_polar_stretch_vs_naive_f_and_firewall(tmp_path: Path) -> None
 
 
 def test_compute_tet_strains_from_F_rotation_invariant() -> None:
-    from trajectory_forge.adapters.deformable_workers.common import compute_tet_strains_from_F
+    from trajectory_forge.adapters.legacy.deformable_workers.common import compute_tet_strains_from_F
 
     theta = math.radians(35.0)
     r_y = np.array(

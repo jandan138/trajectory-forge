@@ -12,7 +12,7 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from trajectory_forge.adapters.distillation_v08.cold_start_runner_v08 import (  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_v08.cold_start_runner_v08 import (  # noqa: E402
     run_v08_cold_start_episode,
     run_v08_full_4joint_slice_with_counterfactuals,
 )

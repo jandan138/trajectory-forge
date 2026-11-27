@@ -16,11 +16,11 @@ _SRC_ROOT = str(Path(__file__).resolve().parents[3])
 if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 
-from trajectory_forge.adapters.deformable_workers.common import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.common import (  # noqa: E402
     apply_low_priority_process_policy,
     jitter_for_seed,
 )
-from trajectory_forge.adapters.distillation_workers_v04.common_v04 import (  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import (  # noqa: E402
     GRASP_HALF_RADIUS_BY_BODY,
     GRASP_LOCAL_OFFSET_BY_BODY,
     _pad_particle_force,
@@ -108,7 +108,7 @@ def _compound_colliders_to_obj(path: Path, cols: dict[str, Any]) -> Path:
 
 
 def _bimanual_cpic_pads(q18: np.ndarray, hy: float = 0.012) -> tuple[Any, ...]:
-    from trajectory_forge.adapters.distillation_workers_v04.common_v04 import ARM_BASE_QUAT_WXYZ, LEFT_ARM_BASE_POS, RIGHT_ARM_BASE_POS
+    from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import ARM_BASE_QUAT_WXYZ, LEFT_ARM_BASE_POS, RIGHT_ARM_BASE_POS
 
     eeL, rL, qL = forward_kinematics_panda(q18[0:7], base_pos=LEFT_ARM_BASE_POS, base_quat_wxyz=ARM_BASE_QUAT_WXYZ)
     lpL = eeL + rL @ np.array([0.0, hy + float(q18[7]), -0.0106], dtype=np.float64)

@@ -16,12 +16,12 @@ for _p in (str(_SRC_ROOT), str(_REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from trajectory_forge.adapters.deformable_workers.common import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers.common import (  # noqa: E402
     apply_low_priority_process_policy,
     jitter_for_seed,
 )
-from trajectory_forge.adapters.deformable_workers_v03.common_v03 import orient_tets_positive  # noqa: E402
-from trajectory_forge.adapters.distillation_workers_v04.common_v04 import (  # noqa: E402
+from trajectory_forge.adapters.legacy.deformable_workers_v03.common_v03 import orient_tets_positive  # noqa: E402
+from trajectory_forge.adapters.legacy.distillation_workers_v04.common_v04 import (  # noqa: E402
     GRASP_HALF_RADIUS_BY_BODY,
     GRASP_LOCAL_OFFSET_BY_BODY,
     V04_TASKS,

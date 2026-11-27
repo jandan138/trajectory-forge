@@ -16,7 +16,7 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from trajectory_forge.adapters.distillation_v06.mesh_penetration_gate_v06 import (
+from trajectory_forge.adapters.legacy.distillation_v06.mesh_penetration_gate_v06 import (
     panda_all_link_world_positions,
 )
 from trajectory_forge.sdk.panda_kinematics import (

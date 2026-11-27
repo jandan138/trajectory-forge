@@ -1,0 +1,11 @@
+schema_version: benchmark-suite/v0.1
+suite_id: real2sim_conference_pc_suite
+embodiment: configs/embodiments/lift2_r5a_bimanual.yaml
+backend: isaac-genmanip
+remediation_mode: physics_tuning
+scenarios:
+  - scenario_id: real2sim_conference_pc_shutdown_inspect
+    package_path: /cpfs/user/zhuzihou/dev/scenario-forge/external_artifacts/real2sim_conference_pc_20261118/scene_gate/packages/real2sim_conference_pc_shutdown_inspect
+    controller: examples/controllers/real2sim/conference_pc_shutdown_inspect_privileged.py
+    max_steps: 2200
+    max_attempts: 2

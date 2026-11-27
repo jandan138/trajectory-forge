@@ -31,7 +31,7 @@ kinematic_chains:
       - right_arm_joint6
       - right_arm_joint7
     ee_link: "right_grasp_frame"
-    neutral_q: [0.0, -0.55, 0.0, 1.55, 0.0, 0.65, 0.0]
+    neutral_q: [0.0, -0.90, 0.0, 1.90, 0.0, 1.00, 0.0]
 
 end_effectors:
   left_ee:
@@ -48,10 +48,10 @@ end_effectors:
     postures:
       open: {left_ee_finger_width_joint: 0.098}
       release: {left_ee_finger_width_joint: 0.098}
-      cylinder_wrap: {left_ee_finger_width_joint: 0.008}
-      cup_wrap: {left_ee_finger_width_joint: 0.016}
-      pinch: {left_ee_finger_width_joint: 0.004}
-      button_press: {left_ee_finger_width_joint: 0.002}
+      cylinder_wrap: {left_ee_finger_width_joint: 0.032}
+      cup_wrap: {left_ee_finger_width_joint: 0.038}
+      pinch: {left_ee_finger_width_joint: 0.020}
+      button_press: {left_ee_finger_width_joint: 0.008}
   right_ee:
     type: "parallel_gripper"
     driver_joints: ["right_ee_finger_width_joint"]
@@ -66,7 +66,7 @@ end_effectors:
     postures:
       open: {right_ee_finger_width_joint: 0.098}
       release: {right_ee_finger_width_joint: 0.098}
-      cylinder_wrap: {right_ee_finger_width_joint: 0.008}
-      cup_wrap: {right_ee_finger_width_joint: 0.016}
-      pinch: {right_ee_finger_width_joint: 0.004}
-      button_press: {right_ee_finger_width_joint: 0.002}
+      cylinder_wrap: {right_ee_finger_width_joint: 0.032}
+      cup_wrap: {right_ee_finger_width_joint: 0.038}
+      pinch: {right_ee_finger_width_joint: 0.020}
+      button_press: {right_ee_finger_width_joint: 0.008}

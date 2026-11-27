@@ -46,6 +46,10 @@ from trajectory_forge.adapters.isaac_genmanip.pbd_metrics import (
     register_pbd_containment_metric,
     sync_stage_pbd_isosurface_materials,
 )
+from trajectory_forge.trajectory.conveyor_math import (
+    eval_racetrack_pose,
+    racetrack_perimeter,
+)
 from trajectory_forge.trajectory.fluid_helpers import (
     compute_aabb_containment_ratio,
     compute_vessel_fill_bounds,
@@ -524,10 +528,12 @@ class IsaacGenManipSimBackend:
         self._pbd_dispensers: list[dict[str, Any]] = []
         self._weight_scales: list[dict[str, Any]] = []
         self._bean_grinders: list[dict[str, Any]] = []
+        self._conveyors: list[dict[str, Any]] = []
         self._closeup_camera: Any = None
         self._init_pbd_dispensers()
         self._init_weight_scales()
         self._init_bean_grinders()
+        self._init_conveyors()
         self._init_closeup_camera()
 
         rob_pos0, _ = self.emb.robot.get_world_pose()
@@ -1465,6 +1471,100 @@ class IsaacGenManipSimBackend:
                         f"[GRINDER_LIVE] step={self.steps_executed} state=BREW_READY max_beans_ground={gr['max_in_grinder']}/{len(gr['bean_prims'])}"
                     )
 
+    def _init_conveyors(self) -> None:
+        """Discover USD-attribute-driven kinematic racetrack conveyors on the stage."""
+        stage = self.scene.world.stage
+        for prim in stage.Traverse():
+            spd_attr = prim.GetAttribute("conveyor:speedMps")
+            pref_attr = prim.GetAttribute("conveyor:slatPrefix")
+            if not (spd_attr and spd_attr.HasValue() and pref_attr and pref_attr.HasValue()):
+                continue
+            slat_prefix = str(pref_attr.Get()).rstrip("/")
+            if not slat_prefix:
+                continue
+            speed_mps = float(spd_attr.Get())
+            L_attr = prim.GetAttribute("conveyor:straightHalfLen")
+            R_attr = prim.GetAttribute("conveyor:turnRadius")
+            ctr_attr = prim.GetAttribute("conveyor:centerWorld")
+            z_attr = prim.GetAttribute("conveyor:surfaceZ")
+            dir_attr = prim.GetAttribute("conveyor:direction")
+            ph_attr = prim.GetAttribute("conveyor:initialPhaseM")
+
+            half_len = float(L_attr.Get()) if (L_attr and L_attr.HasValue()) else 0.42
+            turn_r = float(R_attr.Get()) if (R_attr and R_attr.HasValue()) else 0.16
+            ctr_val = ctr_attr.Get() if (ctr_attr and ctr_attr.HasValue()) else (0.0, 0.08, 0.0)
+            center_xy = (float(ctr_val[0]), float(ctr_val[1]))
+            slat_z = float(z_attr.Get()) if (z_attr and z_attr.HasValue()) else 0.773
+            direction = float(dir_attr.Get()) if (dir_attr and dir_attr.HasValue()) else 1.0
+            phase0 = float(ph_attr.Get()) if (ph_attr and ph_attr.HasValue()) else 0.0
+            perim = racetrack_perimeter(half_len, turn_r)
+
+            slats: list[tuple[str, Any]] = []
+            for p2 in stage.Traverse():
+                pstr = str(p2.GetPath())
+                if pstr.startswith(slat_prefix + "/") and pstr.count("/") == slat_prefix.count("/") + 1:
+                    slats.append((pstr, p2))
+            slats.sort(key=lambda item: item[0])
+            if not slats:
+                continue
+
+            slat_entries: list[dict[str, Any]] = []
+            for idx, (pstr, sp) in enumerate(slats):
+                arc_attr = sp.GetAttribute("conveyor:slatArcS")
+                base_s = float(arc_attr.Get()) if (arc_attr and arc_attr.HasValue()) else (idx * perim / len(slats))
+                t_attr = sp.GetAttribute("xformOp:translate")
+                o_attr = sp.GetAttribute("xformOp:orient")
+                if not (t_attr and t_attr.IsValid()):
+                    t_attr = UsdGeom.Xformable(sp).AddTranslateOp()
+                if not (o_attr and o_attr.IsValid()):
+                    o_attr = UsdGeom.Xformable(sp).AddOrientOp()
+                is_quatd = str(o_attr.GetTypeName()) == "quatd"
+                slat_entries.append(
+                    {
+                        "path": pstr,
+                        "base_s": base_s,
+                        "t_attr": t_attr,
+                        "o_attr": o_attr,
+                        "is_quatd": is_quatd,
+                    }
+                )
+            self._conveyors.append(
+                {
+                    "prim_path": str(prim.GetPath()),
+                    "speed_mps": speed_mps,
+                    "half_len": half_len,
+                    "turn_r": turn_r,
+                    "center_xy": center_xy,
+                    "slat_z": slat_z,
+                    "direction": direction,
+                    "phase0": phase0,
+                    "slats": slat_entries,
+                }
+            )
+            self.controller_logs.append(
+                f"[CONVEYOR_INIT] prim={prim.GetPath()} slats={len(slat_entries)} speed={speed_mps:.4f}m/s dir={direction}"
+            )
+
+    def _tick_conveyors(self) -> None:
+        if not self._conveyors:
+            return
+        t_sim = float((self.steps_executed + 1) * self.physics_dt)
+        for conv in self._conveyors:
+            ds = conv["phase0"] + conv["direction"] * conv["speed_mps"] * t_sim
+            half_len = conv["half_len"]
+            turn_r = conv["turn_r"]
+            center_xy = conv["center_xy"]
+            slat_z = conv["slat_z"]
+            for sl in conv["slats"]:
+                x, y, z, qw, qx, qy, qz = eval_racetrack_pose(
+                    sl["base_s"] + ds, half_len, turn_r, center_xy, slat_z
+                )
+                sl["t_attr"].Set(Gf.Vec3d(x, y, z))
+                if sl["is_quatd"]:
+                    sl["o_attr"].Set(Gf.Quatd(qw, Gf.Vec3d(qx, qy, qz)))
+                else:
+                    sl["o_attr"].Set(Gf.Quatf(qw, Gf.Vec3f(qx, qy, qz)))
+
     def _init_closeup_camera(self) -> None:
         if self.render_camera is None:
             return
@@ -1545,6 +1645,7 @@ class IsaacGenManipSimBackend:
 
         self._apply_robot_targets()
         self._tick_pbd_dispensers()
+        self._tick_conveyors()
         self.scene.world.step(render=False)
         self.steps_executed += 1
         self._evaluate_metrics_tick(force=False)
@@ -1600,6 +1701,55 @@ class IsaacGenManipSimBackend:
 
         self._execute_joint_waypoints(sl, ik_path, total_steps=steps)
         return tuple(float(v) for v in self._target_16dof[sl])
+
+    def move_arms_sync(
+        self,
+        targets: Mapping[str, Pose3D],
+        *,
+        steps: int = 40,
+    ) -> dict[str, tuple[float, ...]]:
+        """Move multiple arm chains synchronously tick-by-tick along Cartesian-interpolated IK paths."""
+        if not targets:
+            return {}
+        num_ik_pts = max(2, min(12, max(2, int(steps) // 5)))
+        chain_paths: dict[str, tuple[slice, list[NDArray[Any]]]] = {}
+        for chain, target_pose in targets.items():
+            _, sl, _ = self._planner_and_slice(chain)
+            start_pose = self.ee_pose(chain)
+            seed_q = self._target_16dof[sl].copy()
+            ik_path: list[NDArray[Any]] = []
+            try:
+                for idx in range(1, num_ik_pts + 1):
+                    alpha = idx / num_ik_pts
+                    xyz = (
+                        start_pose.xyz[0] + alpha * (target_pose.xyz[0] - start_pose.xyz[0]),
+                        start_pose.xyz[1] + alpha * (target_pose.xyz[1] - start_pose.xyz[1]),
+                        start_pose.xyz[2] + alpha * (target_pose.xyz[2] - start_pose.xyz[2]),
+                    )
+                    wxyz = slerp_wxyz(start_pose.wxyz, target_pose.wxyz, alpha)
+                    q_wp = self._solve_ik_internal(chain, Pose3D(xyz=xyz, wxyz=wxyz), seed_q)
+                    ik_path.append(q_wp)
+                    seed_q = q_wp
+            except RuntimeError:
+                q_goal = self._solve_ik_internal(chain, target_pose, self._target_16dof[sl].copy())
+                ik_path = [q_goal]
+            pts = [self._target_16dof[sl].copy(), *[np.asarray(w, dtype=float) for w in ik_path]]
+            chain_paths[chain] = (sl, pts)
+
+        total_steps = max(2, int(steps))
+        for s_idx in range(total_steps):
+            for _chain, (sl, pts) in chain_paths.items():
+                seg_count = len(pts) - 1
+                frac = (s_idx + 1) / total_steps * seg_count
+                seg = min(seg_count - 1, int(math.floor(frac)))
+                local_t = frac - seg
+                self._target_16dof[sl] = pts[seg] + local_t * (pts[seg + 1] - pts[seg])
+            self._step_one_tick()
+        self._evaluate_metrics_tick(force=True)
+        return {
+            chain: tuple(float(v) for v in self._target_16dof[sl])
+            for chain, (sl, _pts) in chain_paths.items()
+        }
 
     def follow_cartesian_path(
         self,
@@ -1720,6 +1870,23 @@ class IsaacGenManipSimBackend:
         grp = self.embodiment.actuator_groups[group]
         for idx, val in zip(grp.dof_indices, targets):
             self._target_16dof[idx] = float(val)
+        n_steps = max(1, int(steps))
+        for _ in range(n_steps):
+            self._step_one_tick()
+        self._evaluate_metrics_tick(force=True)
+
+    def command_actuators_sync(
+        self,
+        group_targets: Mapping[str, tuple[float, ...]],
+        *,
+        control_mode: str = "position",
+        steps: int = 16,
+    ) -> None:
+        _ = control_mode
+        for group, targets in group_targets.items():
+            grp = self.embodiment.actuator_groups[group]
+            for idx, val in zip(grp.dof_indices, targets):
+                self._target_16dof[idx] = float(val)
         n_steps = max(1, int(steps))
         for _ in range(n_steps):
             self._step_one_tick()

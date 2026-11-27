@@ -31,7 +31,7 @@ kinematic_chains:
       - right_arm_fr3_joint6
       - right_arm_fr3_joint7
     ee_link: "right_grasp_frame"
-    neutral_q: [0.0, -0.55, 0.0, -2.15, 0.0, 1.65, 0.785]
+    neutral_q: [-0.30, -0.50, 0.30, -2.10, 0.00, 1.90, 0.40]
 
 end_effectors:
   left_ee:

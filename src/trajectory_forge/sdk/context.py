@@ -124,6 +124,12 @@ class SimBackendProtocol(Protocol):
         use_motion_gen: bool = False,
         check_collision: bool = True,
     ) -> tuple[float, ...]: ...
+    def move_arms_sync(
+        self,
+        targets: Mapping[str, Pose3D],
+        *,
+        steps: int = 40,
+    ) -> dict[str, tuple[float, ...]]: ...
     def follow_cartesian_path(
         self,
         chain: str,
@@ -153,6 +159,13 @@ class SimBackendProtocol(Protocol):
         self,
         group: str,
         targets: tuple[float, ...],
+        *,
+        control_mode: str = "position",
+        steps: int = 16,
+    ) -> None: ...
+    def command_actuators_sync(
+        self,
+        group_targets: Mapping[str, tuple[float, ...]],
         *,
         control_mode: str = "position",
         steps: int = 16,
@@ -316,6 +329,21 @@ class KinematicsAPI:
             chain, poses, steps_per_waypoint=steps_per_waypoint
         )
 
+    def move_arms_sync(
+        self,
+        targets: Mapping[str, Pose3D],
+        *,
+        steps: int = 40,
+    ) -> dict[str, tuple[float, ...]]:
+        """Move multiple arm chains synchronously tick-by-tick along Cartesian-interpolated IK paths."""
+        if not targets:
+            return {}
+        if steps <= 0:
+            raise ContractValidationError("move_arms_sync requires steps > 0")
+        for chain in targets:
+            self._validate_chain(chain)
+        return self._backend.move_arms_sync(dict(targets), steps=steps)
+
     def move_joints(
         self,
         chain: str,
@@ -458,6 +486,30 @@ class EndEffectorAPI:
         _ = max_effort  # Reserved for backend effort-capped drive dispatch
         self._backend.command_actuator(group, targets, control_mode=control_mode, steps=steps)
         return targets
+
+    def set_postures_sync(
+        self,
+        postures: Mapping[str, str],
+        control_mode: str = "position",
+        *,
+        steps: int = 16,
+    ) -> dict[str, tuple[float, ...]]:
+        """Command multiple actuator groups (e.g. left & right grippers) simultaneously."""
+        resolved: dict[str, tuple[float, ...]] = {}
+        for group, posture_name in postures.items():
+            if group not in self._embodiment.actuator_groups:
+                raise KeyError(f"Unknown actuator group: {group!r}")
+            grp = self._embodiment.actuator_groups[group]
+            if control_mode not in grp.control_modes:
+                raise ContractValidationError(
+                    f"Actuator group {group!r} does not support mode {control_mode!r}"
+                )
+            if posture_name not in grp.named_postures:
+                raise KeyError(f"Actuator group {group!r} has no posture {posture_name!r}")
+            resolved[group] = tuple(float(v) for v in grp.named_postures[posture_name])
+        if resolved:
+            self._backend.command_actuators_sync(resolved, control_mode=control_mode, steps=steps)
+        return resolved
 
     def set_joint_targets(
         self,
@@ -752,6 +804,19 @@ class DryRunSimBackend:
         self.step(steps)
         return q
 
+    def move_arms_sync(
+        self,
+        targets: Mapping[str, Pose3D],
+        *,
+        steps: int = 40,
+    ) -> dict[str, tuple[float, ...]]:
+        out: dict[str, tuple[float, ...]] = {}
+        for chain, pose in targets.items():
+            out[chain] = self.solve_ik(chain, pose, check_collision=True)
+            self._ee_poses[chain] = pose
+        self.step(steps)
+        return out
+
     def follow_cartesian_path(
         self,
         chain: str,
@@ -819,6 +884,20 @@ class DryRunSimBackend:
         grp = self.embodiment.actuator_groups[group]
         for idx, val in zip(grp.dof_indices, targets):
             self.current_joint_state[idx] = float(val)
+        self.step(steps)
+
+    def command_actuators_sync(
+        self,
+        group_targets: Mapping[str, tuple[float, ...]],
+        *,
+        control_mode: str = "position",
+        steps: int = 16,
+    ) -> None:
+        for group, targets in group_targets.items():
+            self.actuator_commands.append((group, targets, control_mode))
+            grp = self.embodiment.actuator_groups[group]
+            for idx, val in zip(grp.dof_indices, targets):
+                self.current_joint_state[idx] = float(val)
         self.step(steps)
 
     def current_proprio(self) -> tuple[float, ...]:
